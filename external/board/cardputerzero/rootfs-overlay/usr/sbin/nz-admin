@@ -1,0 +1,164 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# nz-admin - the one privileged helper behind the launcher's Options, Services and Store.
+#
+# The launcher and its apps run as the unprivileged user "zero".  The few things that
+# need root go through this script (sudoers lets "zero" run it without a password).
+# It therefore accepts only the fixed list of actions below and checks every argument;
+# it never runs a command line supplied by the caller.
+#
+#   nz-admin status                      all settings, one "key=value" per line
+#   nz-admin set brightness 5..100       screen brightness (per cent), kept across boots
+#   nz-admin set screen-off 0|15..3600   launcher: seconds of idle before the screen goes dark
+#   nz-admin set volume 0..100           speaker volume (per cent), kept across boots
+#   nz-admin apply-volume                (boot) restore the saved volume
+#   nz-admin set launcher native|m5      which launcher starts at boot
+#   nz-admin set bootlog on|off          boot log on the boot partition (nz-logs/)
+#   nz-admin set wifi-country XX         regulatory domain (two letters), 00 = world default
+#   nz-admin set timezone Region/City    time zone (from /usr/share/zoneinfo)
+#   nz-admin ssh on|off|status           SSH server now and at boot
+#   nz-admin ntp on|off|status|sync      clock from the network
+#   nz-admin set-password                set or change the password of "zero" (asks on the terminal)
+#   nz-admin wifi                        Wi-Fi setup
+#   nz-admin store refresh|install NAME|remove NAME
+#   nz-admin erase-data                  erase the data partition at the next start (asks first)
+#   nz-admin poweroff | reboot
+N=/data/etc/nz
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+[ "$(id -u)" = 0 ] || { echo "nz-admin: must run as root (use: sudo nz-admin ...)" >&2; exit 1; }
+mkdir -p $N
+die() { echo "nz-admin: $*" >&2; exit 2; }
+put() { printf '%s\n' "$2" > "$N/$1.new" && mv "$N/$1.new" "$N/$1"; }
+get() { v=$(cat "$N/$1" 2>/dev/null); echo "${v:-$2}"; }
+hash_of() { sed -n 's/^zero:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null; }
+has_password() { case "$(hash_of)" in '$'*) return 0 ;; esac; return 1; }
+ssh_running() { /etc/init.d/S50dropbear status; }
+
+vol_ctl() {    # the first playback volume control of the sound card, preferring the usual names
+	list=$(amixer scontrols 2>/dev/null | sed -n "s/^Simple mixer control '\\(.*\\)',0$/\\1/p")
+	for want in Master Speaker Headphone DAC PCM ''; do
+		printf '%s\n' "$list" | while IFS= read -r c; do
+			[ -n "$c" ] || continue
+			case "$c" in *"$want"*) amixer sget "$c" 2>/dev/null | grep -q 'pvolume' && { echo "$c"; break; } ;; esac
+		done | head -n1 | grep . && return 0
+	done
+	return 1
+}
+set_volume() { c=$(vol_ctl) || return 1; if [ "$1" = 0 ]; then amixer -q sset "$c" 0% mute 2>/dev/null || amixer -q sset "$c" 0%; else amixer -q sset "$c" "$1%" unmute 2>/dev/null || amixer -q sset "$c" "$1%"; fi; }
+
+set_hash() {   # replace the hash of "zero" in the password file (atomic, on the data partition)
+	f=$(readlink -f /etc/shadow); [ -f "$f" ] || die "no password file"
+	awk -F: -v OFS=: -v h="$1" -v d="$(( $(date +%s) / 86400 ))" '$1=="zero"{$2=h; $3=d} {print}' "$f" > "$f.new" &&
+		chmod 600 "$f.new" && mv "$f.new" "$f" && sync
+}
+ask_secret() { printf '%s' "$1" >&2; stty -echo 2>/dev/null; IFS= read -r REPLY || REPLY=; stty echo 2>/dev/null; echo >&2; }
+set_password() {
+	if has_password && [ "$1" != --first ]; then
+		old=$(hash_of); salt=$(echo "$old" | cut -d'$' -f3)
+		ask_secret "Current password: "
+		[ "$(printf '%s' "$REPLY" | mkpasswd -m sha512 -S "$salt" -P 0 2>/dev/null)" = "$old" ] || { echo "Wrong password." >&2; return 1; }
+	fi
+	while :; do
+		ask_secret "New password for user zero (empty = cancel): "; p1=$REPLY
+		[ -n "$p1" ] || return 3
+		[ ${#p1} -ge 6 ] || { echo "Use at least 6 characters." >&2; continue; }
+		ask_secret "Type it again: "
+		[ "$REPLY" = "$p1" ] && break
+		echo "The two entries differ." >&2
+	done
+	h=$(printf '%s' "$p1" | mkpasswd -m sha512 -P 0) || die "cannot hash the password"
+	case "$h" in '$6$'*) ;; *) die "cannot hash the password" ;; esac
+	set_hash "$h" && echo "Password set." >&2
+}
+
+case "$1" in
+status)
+	echo "brightness=$(get brightness "$(cat /sys/class/backlight/*/brightness 2>/dev/null | head -n1)")"
+	echo "screen-off=$(get screen-off 120)"
+	v=$(get volume ""); echo "volume=${v:+$v%}"
+	# no explicit choice: the M5 launcher takes over once it is installed (as its package intends)
+	[ -x /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch ] && dl=m5 || dl=native
+	echo "launcher=$(get launcher $dl)"
+	echo "bootlog=$(get bootlog on)"
+	echo "wifi-country=$(get wifi-country 00)"
+	tz=$(readlink /data/etc/localtime 2>/dev/null); echo "timezone=${tz#/usr/share/zoneinfo/}"
+	echo "ssh=$(get ssh on)"; ssh_running && echo "ssh-running=yes" || echo "ssh-running=no"
+	echo "ntp=$(get ntp on)"
+	has_password && echo "password=set" || echo "password=none"
+	[ -x /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch ] && echo "m5-launcher=installed" || echo "m5-launcher=absent"
+	;;
+set)
+	case "$2" in
+	brightness)
+		case "$3" in ''|*[!0-9]*) die "brightness: a number from 5 to 100" ;; esac
+		[ "$3" -ge 5 ] && [ "$3" -le 100 ] || die "brightness: a number from 5 to 100"
+		for d in /sys/class/backlight/*; do
+			[ -e "$d/brightness" ] || continue
+			max=$(cat "$d/max_brightness" 2>/dev/null || echo 100)
+			echo $(( $3 * max / 100 )) > "$d/brightness"
+			put brightness $(( $3 * max / 100 ))
+		done
+		[ -e "$N/brightness" ] || put brightness "$3" ;;
+	screen-off)
+		case "$3" in ''|*[!0-9]*) die "screen-off: 0 (never) or 15..3600 seconds" ;; esac
+		[ "$3" = 0 ] || { [ "$3" -ge 15 ] && [ "$3" -le 3600 ]; } || die "screen-off: 0 (never) or 15..3600 seconds"
+		put screen-off "$3" ;;
+	volume)
+		case "$3" in ''|*[!0-9]*) die "volume: a number from 0 to 100" ;; esac
+		[ "$3" -le 100 ] || die "volume: a number from 0 to 100"
+		set_volume "$3" || { echo "nz-admin: no playback volume control found" >&2; exit 5; }
+		put volume "$3" ;;
+	launcher) case "$3" in native|m5) put launcher "$3" ;; *) die "launcher: native or m5" ;; esac ;;
+	bootlog) case "$3" in on|off) put bootlog "$3" ;; *) die "bootlog: on or off" ;; esac ;;
+	wifi-country)
+		case "$3" in [A-Z][A-Z]|00) ;; *) die "wifi-country: two capital letters, e.g. US, DE, JP (00 = world default)" ;; esac
+		put wifi-country "$3"; iw reg set "$3" 2>/dev/null
+		c=/data/etc/wpa_supplicant.conf
+		if [ -f $c ]; then
+			sed -i '/^country=/d' $c; [ "$3" = 00 ] || sed -i "1i country=$3" $c
+		fi ;;
+	timezone)
+		case "$3" in *..*|/*|*[!A-Za-z0-9_+/-]*|'') die "timezone: a name such as Europe/Berlin or Etc/UTC" ;; esac
+		[ -f "/usr/share/zoneinfo/$3" ] || die "timezone: unknown zone $3"
+		ln -snf "/usr/share/zoneinfo/$3" /data/etc/localtime ;;
+	*) die "unknown setting '$2'" ;;
+	esac ;;
+ssh)
+	case "$2" in
+	on) put ssh on; has_password || { echo "SSH needs a password for user zero first (Options > Password)." >&2; exit 4; }; /etc/init.d/S50dropbear restart >/dev/null ;;
+	off) put ssh off; /etc/init.d/S50dropbear stop >/dev/null ;;
+	status) ssh_running && echo running || echo stopped ;;
+	*) die "ssh: on, off or status" ;;
+	esac ;;
+ntp)
+	case "$2" in
+	on) put ntp on; rm -f /run/nz/ntp-started; "$0" ntp sync >/dev/null 2>&1 & ;;
+	off) put ntp off ;;
+	status) get ntp on ;;
+	sync)
+		s=${NZ_NTP_SERVER:-pool.ntp.org}
+		timeout 40 ntpd -n -q -p "$s" >/dev/null 2>&1 || { echo "no answer from $s" >&2; exit 1; }
+		hwclock -w -u 2>/dev/null; : > /run/nz/ntp-done; date ;;
+	*) die "ntp: on, off, status or sync" ;;
+	esac ;;
+apply-volume) v=$(get volume ""); [ -n "$v" ] && set_volume "$v" ;;
+set-password) set_password "$2" ;;
+wifi) exec nz-wifi ;;
+store)
+	case "$2" in
+	refresh) exec nz-store-backend refresh ;;
+	install|remove)
+		case "$3" in ''|*[!a-z0-9+.-]*) die "store: bad package name" ;; esac
+		exec nz-store-backend "$2" "$3" ;;
+	*) die "store: refresh, install NAME or remove NAME" ;;
+	esac ;;
+erase-data)
+	echo "This erases ALL settings, passwords, Wi-Fi networks and files in /home at the next start."
+	printf 'Type ERASE to confirm: '; IFS= read -r a
+	[ "$a" = ERASE ] || { echo "Nothing was changed."; exit 3; }
+	mount -o remount,rw /boot && : > /boot/nz-reset-data && sync && mount -o remount,ro /boot || die "cannot write the marker on the boot partition"
+	echo "Marked. Restarting..."; sleep 2; reboot ;;
+poweroff) exec nz-poweroff ;;
+reboot) sync; exec reboot ;;
+*) sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

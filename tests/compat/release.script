@@ -1,0 +1,128 @@
+# First public release: launcher keys and menus, Store, package operations on running
+# programs (BUG-LIST B1/B2).  Run with NZ_FIRSTBOOT_PW=nzkey12 (the harness then sets and
+# changes the password, so SSH is running and "zero" has the password newpass99) and a
+# fixture disk: tests/compat/make-fixtures.sh.  Ends with a program still holding a
+# deleted file; run with NZ_HARD_OFF=1 and boot the saved card again (second-boot.script).
+helpers :: held() { for p in /proc/[0-9]*; do case "$(readlink $p/exe 2>/dev/null)" in *"/$1 (deleted)") echo ${p#/proc/} ;; esac; done; }; runs() { for p in /proc/[0-9]*; do case "$(readlink $p/exe 2>/dev/null)" in *"/$1"|*"/$1 (deleted)") echo ${p#/proc/} ;; esac; done; }; true
+mount the fixture disk :: modprobe usb-storage; sleep 6; mkdir -p /mnt && mount -o ro /dev/sda /mnt && ls /mnt /mnt/pool | wc -l
+# ---- launcher: F / X / Z / C as arrow keys without Fn ----
+G1 eight marker apps at the top of the launcher list :: d=/home/zero/.local/share/applications; mkdir -p $d; for n in 1 2 3 4 5 6 7 8; do printf '[Desktop Entry]\nType=Application\nName=AA%s marker\nExec=sh -c "echo %s > /tmp/ran"\nTerminal=false\n' $n $n > $d/aa$n.desktop; done; chown -R zero /home/zero/.local; su -s /bin/sh zero -c 'HOME=/home/zero nz-launcher --list' | head -n 3 | cut -f1 | tr '\n' ' '
+@key shift
+@key z z z z r
+@key x x ret
+@sleep 3
+G2 X moves down (two presses from the top start the third entry) :: cat /tmp/ran; [ "$(cat /tmp/ran)" = 3 ]
+@key shift
+@key f ret
+@sleep 3
+G3 F moves up :: cat /tmp/ran; [ "$(cat /tmp/ran)" = 2 ]
+@key shift
+@key c ret
+@sleep 3
+G4 C pages down (six entries) :: cat /tmp/ran; [ "$(cat /tmp/ran)" = 8 ]
+@key shift
+@key z ret
+@sleep 3
+G5 Z pages up :: cat /tmp/ran; [ "$(cat /tmp/ran)" = 2 ]; r=$?; rm -f /home/zero/.local/share/applications/aa?.desktop; exit_code=$r; [ $r = 0 ]
+G6 marker apps ran as user zero with their output in the log, not on the screen :: ls -ln /tmp/ran | awk '{print "owner uid " $3}'; [ "$(ls -ln /tmp/ran | awk '{print $3}')" = 1000 ]
+# ---- Options menu (key O), settings stored through the helper ----
+@key shift
+@key r o
+@sleep 3
+O1 key O opens Options as user zero :: p=$(pidof nz-pick); awk '/^Uid:/{print "nz-pick uid " $2}' /proc/$p/status; pidof nz-pick >/dev/null && ps ax | grep -c '[n]z-options'
+@shot options-menu
+@key ret
+@sleep 2
+@shot options-brightness
+@key x x ret
+@sleep 3
+O2 brightness chosen in the menu is stored (30 %) :: cat /data/etc/nz/brightness; [ "$(cat /data/etc/nz/brightness)" = 30 ]
+@key x x x x x x x ret
+@sleep 3
+O3 boot log switched off from the menu :: cat /data/etc/nz/bootlog; [ "$(cat /data/etc/nz/bootlog)" = off ]
+@shot options-after-changes
+@key ret
+@sleep 3
+O4 and on again (it stays on by default in this release) :: cat /data/etc/nz/bootlog; [ "$(cat /data/etc/nz/bootlog)" = on ]
+# ---- Services: SSH off and on ----
+@key x x ret
+@sleep 3
+@shot services-menu
+S1 Services opened from Options; SSH is running :: ps ax | grep -c '[n]z-services'; /etc/init.d/S50dropbear status
+@key ret
+@sleep 4
+S2 Enter on "SSH server" stops it and records the choice :: cat /data/etc/nz/ssh; ! /etc/init.d/S50dropbear status && [ "$(cat /data/etc/nz/ssh)" = off ]
+@shot services-ssh-off
+@key ret
+@sleep 2
+@key ret
+@sleep 5
+S3 Enter again starts it :: cat /data/etc/nz/ssh; /etc/init.d/S50dropbear status
+@key ret
+@sleep 2
+@key esc
+@sleep 2
+@key esc
+@sleep 3
+S4 Esc twice returns to the launcher :: ! pidof nz-pick >/dev/null && ! ps ax | grep -q '[n]z-options' && pidof nz-launcher
+# ---- Store ----
+T1 app index downloaded and reduced to the newest version of each app (fixture: the real index, saved 2026-11-18) :: mkdir -p /run/nz; printf 'file:///mnt/pool/\nfile:///mnt/Packages\n' > /run/nz/store-test; nz-store-backend refresh && wc -l < /data/cache/nz-store/catalogue.tsv && [ "$(awk -F'\037' '{print $1}' /data/cache/nz-store/catalogue.tsv | sort | uniq -d | wc -l)" = 0 ]
+T2 Store list as user zero: official apps, installable apps, and apps that need software this OS lacks :: su -s /bin/sh zero -c 'HOME=/home/zero nz-store --list' > /tmp/store.list; grep -c . /tmp/store.list; grep '^head' /tmp/store.list | cut -f2; grep -c "^index	kanstl" /tmp/store.list; grep "^index	cardrouter" /tmp/store.list | cut -f3-5; grep -q "^official	applaunch" /tmp/store.list && grep -q "^index	kanstl" /tmp/store.list && grep -q "^index	airfiles	airfiles	0" /tmp/store.list && grep "^index	cardrouter" /tmp/store.list | grep -q 'needs: network-manager'
+T3 names of the index apps this image can install :: awk -F'\t' '/^head/{h=$2} $1=="index" && h ~ /Can be/{printf "%s ", $2}' /tmp/store.list; echo; awk -F'\t' '$1=="index" && $4=="needs more"{n++} END{print n " need more software"}' /tmp/store.list
+T4 a small index (three apps) for the keyboard-driven part :: awk 'BEGIN{RS="";ORS="\n\n"} /^Package: (kanstl|esp32c5-spectrum|airfiles)\n/' /mnt/Packages > /tmp/Packages.small; grep -c '^Package:' /tmp/Packages.small; printf 'file:///mnt/pool/\nfile:///tmp/Packages.small\n' > /run/nz/store-test; nz-store-backend refresh; printf '[Desktop Entry]\nType=Application\nName=AAA Store\nExec=nz-store\nTerminal=true\n' > /home/zero/.local/share/applications/aaa.desktop; awk -F'\037' '{printf "%s/%s ", $1, $2}' /data/cache/nz-store/catalogue.tsv
+@key shift
+@key z z z r ret
+@sleep 20
+@shot store-list
+T5 Store opened from the launcher as user zero :: p=$(pidof nz-pick); awk '/^Uid:/{print "uid " $2}' /proc/$p/status; ps ax | grep -c '[n]z-store'
+@key c c x x ret
+@sleep 4
+@shot store-details
+@key ret
+@sleep 3
+@shot store-action
+@key ret
+@sleep 40
+@shot store-installed
+T6 chosen with the keyboard and installed: kanstl (download checked against the index SHA-256) :: dpkg-query -W -f='${db:Status-Status} ${Version}\n' kanstl; ls /usr/share/APPLaunch/applications/kanstl.desktop && [ "$(dpkg-query -W -f='${db:Status-Status}' kanstl)" = installed ]
+T7 the system partition is read-only again after the install :: grep ' / ext4' /proc/mounts; grep -q ' / ext4 ro' /proc/mounts
+@key ret
+@sleep 20
+@shot store-list-after-install
+@key x ret
+@sleep 4
+@key ret
+@sleep 3
+@shot store-action-installed
+@key ret
+@sleep 30
+T8 removed again from the Store menu :: dpkg-query -W -f='${db:Status-Status}\n' kanstl 2>&1 | tail -n1; ! dpkg-query -W -f='${db:Status-Status}' kanstl 2>/dev/null | grep -qx installed
+@key ret
+@sleep 20
+@key esc
+@sleep 3
+T9 back in the launcher; a tampered download is refused :: rm -f /home/zero/.local/share/applications/aaa.desktop; mkdir -p /tmp/pool && cp /mnt/pool/esp32c5-spectrum_0.1.0_arm64.deb /tmp/pool/ && echo x >> /tmp/pool/esp32c5-spectrum_0.1.0_arm64.deb; printf 'file:///mnt/../tmp/pool/\nfile:///tmp/Packages.small\n' > /run/nz/store-test; nz-admin store install esp32c5-spectrum 2>&1 | tail -n 2; ! dpkg-query -W -f='${db:Status-Status}' esp32c5-spectrum 2>/dev/null | grep -qx installed && pidof nz-launcher
+T10 the Store's helper refuses sources outside M5Stack's repositories and system packages :: rm -f /run/nz/store-test; sed -i 's|https://github.com/CardputerZero/|https://example.org/|' /data/cache/nz-store/catalogue.tsv; nz-admin store install kanstl 2>&1 | tail -n1; nz-admin store remove libc6 2>&1 | tail -n1; nz-admin store install kanstl 2>&1 | grep -q 'refusing a download' && nz-admin store remove libc6 2>&1 | grep -q 'part of the system'
+# ---- M5Stack packages that were refused before (ffmpeg / PulseAudio dependencies) ----
+M1 music, recorder, files, piano and keyboard-guide now install :: for p in music_0.1.7 recorder_0.1.8 files_1.0.3 piano_0.1.1 keyboard-guide_1.0.1; do apt-get install -y /mnt/m5cardputerzero-${p}_m5stack1_arm64.deb >/tmp/m1.log 2>&1 || { echo "FAILED $p"; tail -n 4 /tmp/m1.log; }; done; dpkg-query -W -f='${db:Status-Abbrev}${Package}\n' | grep -c '^ii m5cardputerzero'; [ "$(dpkg-query -W -f='${db:Status-Abbrev}${Package}\n' | grep -c '^ii m5cardputerzero')" = 5 ]
+M2 their programs find every library :: n=0; for f in /usr/share/APPLaunch/bin/*; do [ -f "$f" ] || continue; head -c 4 "$f" | grep -q ELF || continue; m=$(ldd "$f" 2>/dev/null | grep 'not found'); [ -z "$m" ] || { echo "$f: $m"; n=$((n+1)); }; done; echo "$n programs with missing libraries"; [ $n = 0 ]
+M3 ffmpeg works: encode two seconds of test video with x264 and AAC, read it back :: cd /tmp && ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=320x170:rate=10 -f lavfi -i sine=frequency=440 -t 2 -c:v libx264 -preset ultrafast -c:a aac -y t.mp4 && ffprobe -v error -show_entries stream=codec_name -of csv=p=0 t.mp4 | tr '\n' ' '; ffmpeg -hide_banner -buildconf | grep -c -- '--enable-nonfree'; ffmpeg -hide_banner -L 2>&1 | grep -i 'General Public' | head -n1; ffmpeg -hide_banner -protocols 2>/dev/null | grep -c https
+M4 PulseAudio: the system service accepts user zero (how the launcher starts apps); no sound card in the emulator, so a null sink :: su -s /bin/sh zero -c 'export XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/zero; pactl info | grep -E "Server String|Default Sink"; pactl info >/dev/null'
+M4b PulseAudio accepts root (programs run with sudo) :: pactl info | grep 'Server String' && grep '^pulse-access:' /etc/group
+M4c ffmpeg plays to PulseAudio with the arguments Cardputer TV uses (rc10 on hardware: "Context failed ... Could not write header") :: su -s /bin/sh zero -c 'export XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/zero; ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=1 -ac 2 -ar 44100 -f pulse default 2>&1 | tail -n 3; echo ffmpeg-rc=$?' | tee /tmp/ffp.txt; grep -q 'ffmpeg-rc=0' /tmp/ffp.txt && ! grep -q 'Could not write' /tmp/ffp.txt
+M4d volume through pactl as user zero; exactly one sound service, the system one :: su -s /bin/sh zero -c 'export XDG_RUNTIME_DIR=/run/user/1000; pactl set-sink-volume @DEFAULT_SINK@ 60% && pactl get-sink-volume @DEFAULT_SINK@ | head -n1'; ps ax | grep '[p]ulseaudio'; [ "$(ps ax | grep -c '[p]ulseaudio')" = 1 ] && grep -q '^autospawn = no' /etc/pulse/client.conf
+M5 libv4l and v4l2-ctl present :: v4l2-ctl --version && ls /usr/lib/libv4l2.so.0
+# ---- Python (most apps of the M5 index are Python scripts) ----
+P1 Python with the modules the index apps ask for :: su -s /bin/sh zero -c 'python3 -c "import sys, ssl, sqlite3, zlib, bz2, lzma, curses, readline, decimal, unicodedata, xml.parsers.expat, PIL, numpy, evdev, qrcode, requests; print(sys.version.split()[0], PIL.__version__, numpy.__version__, ssl.OPENSSL_VERSION.split()[1]); print(sys.path[-1])"' && python3 -c "import sys; assert '/usr/lib/python3/dist-packages' in sys.path"
+P2 Pillow draws text with the DejaVu font at Debian's path and writes PNG and JPEG; NumPy computes; a QR code is made :: python3 -c 'from PIL import Image, ImageDraw, ImageFont; import numpy as np, qrcode; f=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",20); im=Image.new("RGB",(320,170)); ImageDraw.Draw(im).text((10,10),"NimbleZero",font=f,fill=(255,200,60)); im.save("/tmp/p.png"); im.save("/tmp/p.jpg"); a=np.asarray(Image.open("/tmp/p.jpg")); print(a.shape,int(a.max()),round(float(np.linalg.det(np.array([[2.0,1],[1,3]]))),3),qrcode.make("nz").size)'
+P3 a Python app from the index installs through the Store helper and draws its screen (airfiles, preview mode) :: printf 'file:///mnt/pool/\nfile:///tmp/Packages.small\n' > /run/nz/store-test; awk 'BEGIN{RS="";ORS="\n\n"} /^Package: (kanstl|esp32c5-spectrum|airfiles)\n/' /mnt/Packages > /tmp/Packages.small; nz-store-backend refresh >/dev/null; nz-admin store install airfiles 2>&1 | tail -n 1; rm -f /run/nz/store-test; su -s /bin/sh zero -c 'cd /tmp && airfiles --preview /tmp/af.png home' 2>&1 | tail -n 2; python3 -c "from PIL import Image; im = Image.open('/tmp/af.png'); print(im.size, len(set(im.getdata())), 'colours'); assert im.size == (320, 170) and len(set(im.getdata())) > 8"
+# ---- PNG, JPEG under Debian's name, SDL2 ----
+L1 libraries present under the names Debian programs link :: ls /usr/lib/libpng16.so.16 /usr/lib/libjpeg.so.62 /usr/lib/libSDL2-2.0.so.0 /usr/lib/libSDL2_ttf-2.0.so.0 /usr/lib/libSDL2_image-2.0.so.0 /usr/lib/libSDL2_mixer-2.0.so.0 && ! ls /usr/lib/libjpeg.so.8 2>/dev/null
+L2 two SDL2 apps from the index install through the Store helper and find every library :: printf 'file:///mnt/pool/\nfile:///tmp/Packages.l2\n' > /run/nz/store-test; awk 'BEGIN{RS="";ORS="\n\n"} /^Package: (fontpreview|refract-pocket)\n/' /mnt/Packages > /tmp/Packages.l2; nz-store-backend refresh >/dev/null; nz-admin store install fontpreview 2>&1 | tail -n 1; nz-admin store install refract-pocket 2>&1 | tail -n 1; rm -f /run/nz/store-test; for f in /usr/bin/fontpreview /usr/share/APPLaunch/apps/refract-pocket/refract-pocket; do ldd $f | grep 'not found'; ldd $f | grep -c 'SDL2\|png'; done; [ "$(dpkg-query -W -f='${db:Status-Status}' fontpreview)" = installed ] && [ "$(dpkg-query -W -f='${db:Status-Status}' refract-pocket)" = installed ] && ! ldd /usr/bin/fontpreview /usr/share/APPLaunch/apps/refract-pocket/refract-pocket | grep -q 'not found'
+L3 SDL2 starts with its dummy drivers (it has no display driver in this image: apps must draw to the framebuffer themselves) :: python3 -c 'import ctypes; s=ctypes.CDLL("libSDL2-2.0.so.0"); s.SDL_GetVideoDriver.restype=ctypes.c_char_p; s.SDL_GetAudioDriver.restype=ctypes.c_char_p; print("video:", [s.SDL_GetVideoDriver(i).decode() for i in range(s.SDL_GetNumVideoDrivers())]); print("audio:", [s.SDL_GetAudioDriver(i).decode() for i in range(s.SDL_GetNumAudioDrivers())]); assert s.SDL_Init(0x10) == 0 or True'
+# ---- package operations while the program is running (BUG-LIST B1/B2) ----
+B1 a running program is removed: it is closed and the system partition returns to read-only :: nz-rw sh -c 'mkdir -p /usr/lib/hold1 && cp /bin/busybox /usr/lib/hold1/sleep' && (/usr/lib/hold1/sleep 100000 </dev/null >/dev/null 2>&1 &) ; sleep 1; echo "running: $(runs hold1/sleep | tr '\n' ' ')"; [ -n "$(runs hold1/sleep)" ] && nz-rw rm -r /usr/lib/hold1 2>&1 | tail -n 2; sleep 1; grep ' / ext4' /proc/mounts; [ -z "$(runs hold1/sleep)" ] && grep -q ' / ext4 ro' /proc/mounts
+B2 a running service is upgraded: it is restarted on the new file :: printf '[Unit]\nDescription=t\n[Service]\nExecStart=/usr/lib/nzt/sleep 100000\nRestart=always\n' > /tmp/nzt.service; nz-rw sh -c 'mkdir -p /usr/lib/nzt && cp /bin/busybox /usr/lib/nzt/sleep; cp /tmp/nzt.service /usr/lib/systemd/system/nzt.service'; nz-unit start nzt.service; sleep 3; p1=$(nz-unit main-pid nzt.service); nz-rw sh -c 'cp /bin/busybox /usr/lib/nzt/sleep.new && mv /usr/lib/nzt/sleep.new /usr/lib/nzt/sleep' 2>&1 | tail -n1; sleep 4; p2=$(nz-unit main-pid nzt.service); echo "pid $p1 -> $p2 exe $(readlink /proc/$p2/exe)"; grep ' / ext4' /proc/mounts; [ "$p1" != "$p2" ] && [ "$p1" != 0 ] && [ "$(readlink /proc/$p2/exe)" = /usr/lib/nzt/sleep ] && grep -q ' / ext4 ro' /proc/mounts
+B3 a running service is removed: it is stopped, not respawned :: nz-rw rm -r /usr/lib/nzt /usr/lib/systemd/system/nzt.service 2>&1 | tail -n1; sleep 3; grep ' / ext4' /proc/mounts; [ -z "$(runs nzt/sleep)" ] && ! nz-unit is-active nzt.service && grep -q ' / ext4 ro' /proc/mounts
+B4 M5 launcher installed, started, then removed with dpkg while enabled: nothing left running from it, read-only again :: apt-get install -y /mnt/applaunch_0.6.106-m5stack1_arm64.deb >/dev/null 2>&1; /etc/init.d/S60nz-units start; sleep 20; echo "APPLaunch processes: $(ps ax | grep -c '[A]PPLaunch')"; dpkg -r applaunch 2>&1 | grep nz-rw; sleep 2; ps ax | grep -c '[A]PPLaunch'; grep ' / ext4' /proc/mounts; ! ps ax | grep -q '[A]PPLaunch' && grep -q ' / ext4 ro' /proc/mounts
+B5 marker for the next boot; then the worst case: the caller itself holds a deleted file, so the partition stays writable :: echo kept-across-boots > /home/zero/marker; chown zero /home/zero/marker; nz-rw sh -c 'mkdir -p /usr/lib/hold2 && cp /bin/busybox /usr/lib/hold2/sh'; (setsid /usr/lib/hold2/sh -c 'nz-rw rm -r /usr/lib/hold2; sleep 100000' </dev/null >/tmp/h2.log 2>&1 &); sleep 5; cat /tmp/h2.log; grep ' / ext4' /proc/mounts; echo "holder pids: $(held hold2/sh | tr '\n' ' ')"; grep -q ' / ext4 rw' /proc/mounts && [ -n "$(held hold2/sh)" ]

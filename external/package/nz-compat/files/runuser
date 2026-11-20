@@ -1,0 +1,8 @@
+#!/bin/sh
+# runuser shim: "runuser -u USER -- CMD ARGS..." via BusyBox su (util-linux
+# runuser needs PAM, which this system does not carry).
+u=
+while [ $# -gt 0 ]; do case "$1" in -u) u=$2; shift 2 ;; --) shift; break ;; -l|-) shift ;; *) break ;; esac; done
+[ -n "$u" ] || { echo "runuser (nz shim): -u USER required" >&2; exit 1; }
+cmd=; for a; do cmd="$cmd '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"; done
+exec su -s /bin/sh "$u" -c "exec $cmd"

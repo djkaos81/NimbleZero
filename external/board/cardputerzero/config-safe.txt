@@ -1,0 +1,14 @@
+# NimbleZero - conservative fallback configuration.
+# Only the board overlay (LCD + keyboard) is loaded; HDMI and UART consoles are
+# enabled so a failed LCD bring-up can still be debugged.
+arm_64bit=1
+kernel=Image
+enable_uart=1
+uart_2ndstage=1
+camera_auto_detect=0
+hdmi_force_hotplug=1
+dtparam=i2c_arm=on
+dtparam=spi=on
+dtoverlay=vc4-kms-v3d
+dtoverlay=cardputerzero-v5-overlay
+cmdline=cmdline-safe.txt

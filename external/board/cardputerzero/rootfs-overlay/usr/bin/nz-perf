@@ -1,0 +1,80 @@
+#!/bin/sh
+# nz-perf - structured system measurements for comparing OS configurations.
+#   nz-perf [-i SECONDS] [-b]     prints one JSON object on stdout
+#     -i  sampling interval for CPU / wakeup / storage deltas (default 10)
+#     -b  also run the framebuffer fill benchmark (draws on the LCD)
+# Everything is read from procfs/sysfs; nothing here estimates power.  Battery
+# current is reported only if the fuel gauge exposes it.
+INT=10; BENCH=0
+while getopts i:b o; do case $o in i) INT=$OPTARG ;; b) BENCH=1 ;; esac; done
+
+j() { printf '  "%s": %s,\n' "$1" "$2"; }
+js() { printf '  "%s": "%s",\n' "$1" "$2"; }
+mem() { awk -v k="$1:" '$1==k{print $2}' /proc/meminfo; }
+stat_cpu() { awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
+stat_field() { awk -v k="$1" '$1==k{print $2}' /proc/stat; }
+irqs() { awk 'NR>1{for(i=2;i<=NF;i++) if($i ~ /^[0-9]+$/) s+=$i} END{print s+0}' /proc/interrupts; }
+disk() { awk '$3=="mmcblk0"{print $6, $10, $4, $8}' /proc/diskstats; }  # rd sectors, wr sectors, rd ios, wr ios
+idle_ms() { cat /sys/devices/system/cpu/cpu*/cpuidle/state*/time 2>/dev/null | awk '{s+=$1} END{print int(s/1000)}'; }
+
+set -- $(stat_cpu); c0=$1; i0=$2; x0=$(stat_field ctxt); q0=$(irqs); f0=$(stat_field processes)
+set -- $(disk); dr0=${1:-0}; dw0=${2:-0}; dwi0=${4:-0}; im0=$(idle_ms)
+sleep "$INT"
+set -- $(stat_cpu); c1=$1; i1=$2; x1=$(stat_field ctxt); q1=$(irqs); f1=$(stat_field processes)
+set -- $(disk); dr1=${1:-0}; dw1=${2:-0}; dwi1=${4:-0}; im1=$(idle_ms)
+ncpu=$(grep -c ^processor /proc/cpuinfo)
+
+echo "{"
+js variant "$(sed -n 's/^VARIANT=//p' /etc/nz-release 2>/dev/null)"
+js version "$(sed -n 's/^VERSION=//p' /etc/nz-release 2>/dev/null)"
+js kernel "$(uname -r)"
+js machine "$(tr -d '\0' < /sys/firmware/devicetree/base/model 2>/dev/null)"
+js init "$(readlink -f /proc/1/exe 2>/dev/null)"
+# --- boot timing (seconds since kernel start; firmware/bootloader time is not visible from here)
+j boot_kernel_to_init_s "$(dmesg | sed -n 's/^\[ *\([0-9.]*\)\] Run \/sbin\/init.*/\1/p;s/^\[ *\([0-9.]*\)\] Run \/init.*/\1/p' | head -n1 | grep . || echo null)"
+j boot_init_start_s "$(cat /run/nz/t_init_start 2>/dev/null || echo null)"
+j boot_init_done_s "$(cat /run/nz/t_init_done 2>/dev/null || echo null)"
+j uptime_s "$(cut -d' ' -f1 /proc/uptime)"
+js boot_init_script_s "$(awk '{printf "%s=%.2f ", $3, $2-$1}' /run/nz/rcS-times 2>/dev/null)"
+# --- memory (kB)
+j mem_total_kb "$(mem MemTotal)"; j mem_free_kb "$(mem MemFree)"; j mem_available_kb "$(mem MemAvailable)"
+j mem_used_kb "$(( $(mem MemTotal) - $(mem MemAvailable) ))"
+j mem_slab_kb "$(mem Slab)"; j mem_cached_kb "$(mem Cached)"; j mem_kernelstack_kb "$(mem KernelStack)"
+j mem_cma_total_kb "$(mem CmaTotal || echo 0)"
+j userspace_rss_kb "$(awk '/^VmRSS:/{s+=$2} END{print s+0}' /proc/[0-9]*/status 2>/dev/null)"
+j userspace_pss_kb "$(cat /proc/[0-9]*/smaps_rollup 2>/dev/null | awk '/^Pss:/{s+=$2} END{print s+0}')"
+# --- processes
+j processes_total "$(ls -d /proc/[0-9]* | wc -l)"
+j processes_user "$({ for p in /proc/[0-9]*; do [ -n "$(tr -d '\0' < $p/cmdline)" ] && echo; done; } 2>/dev/null | wc -l)"
+j kernel_modules "$(wc -l < /proc/modules)"
+printf '  "user_process_list": "%s",\n' "$({ for p in /proc/[0-9]*; do c=$(tr '\0' ' ' < $p/cmdline | cut -c1-40 | tr -d '"\\'); [ -n "$c" ] && printf '%s;' "$c"; done; } 2>/dev/null)"
+# --- CPU activity over the interval
+j sample_interval_s "$INT"
+j cpu_idle_pct "$(awk -v a=$c0 -v b=$c1 -v x=$i0 -v y=$i1 'BEGIN{printf "%.2f", (b-a)?100*(y-x)/(b-a):0}')"
+j interrupts_per_s "$(awk -v a=$q0 -v b=$q1 -v t=$INT 'BEGIN{printf "%.1f",(b-a)/t}')"
+j context_switches_per_s "$(awk -v a=$x0 -v b=$x1 -v t=$INT 'BEGIN{printf "%.1f",(b-a)/t}')"
+j forks_per_s "$(awk -v a=$f0 -v b=$f1 -v t=$INT 'BEGIN{printf "%.2f",(b-a)/t}')"
+j cpuidle_residency_pct "$(awk -v a=$im0 -v b=$im1 -v t=$INT -v n=$ncpu 'BEGIN{ if(b>0) printf "%.2f",100*(b-a)/(t*1000*n); else print "null"}')"
+js cpufreq_governor "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+j cpufreq_cur_khz "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo null)"
+j load1 "$(cut -d' ' -f1 /proc/loadavg)"
+# --- storage
+j sd_read_kb_per_s "$(awk -v a=$dr0 -v b=$dr1 -v t=$INT 'BEGIN{printf "%.2f",(b-a)/2/t}')"
+j sd_write_kb_per_s "$(awk -v a=$dw0 -v b=$dw1 -v t=$INT 'BEGIN{printf "%.2f",(b-a)/2/t}')"
+j sd_write_ios_in_interval "$((dwi1-dwi0))"
+j sd_written_since_boot_kb "$((dw1/2))"
+j rootfs_used_kb "$(df -k / | awk 'NR==2{print $3}')"
+js rootfs_mount "$(awk '$2=="/"{print $4}' /proc/mounts | tail -n1 | cut -d, -f1)"
+# --- application / display
+j diag_first_frame_ms "$(sed -n 's/first_frame_ms=//p' /run/nz-diag.stats 2>/dev/null | grep . || echo null)"
+t0=$(awk '{print $1}' /proc/uptime); n=0; while [ $n -lt 50 ]; do /bin/true; n=$((n+1)); done; t1=$(awk '{print $1}' /proc/uptime)
+j exec_latency_ms "$(awk -v a=$t0 -v b=$t1 'BEGIN{printf "%.2f",(b-a)*1000/50}')"
+if [ "$BENCH" = 1 ]; then js fb_bench "$(nz-diag --bench 2>&1 | tr -d '"')"; fi
+# --- power-management interfaces that exist on this boot
+js pm_sleep_states "$(cat /sys/power/state 2>/dev/null)"
+js pm_cpuidle_states "$(cat /sys/devices/system/cpu/cpu0/cpuidle/state*/name 2>/dev/null | tr '\n' ' ')"
+js pm_cpufreq_governors "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null)"
+js pm_backlight "$(ls /sys/class/backlight 2>/dev/null | tr '\n' ' ')"
+js pm_battery "$(for b in /sys/class/power_supply/*; do [ -e $b/current_now ] && printf '%s:%suA:%suV ' ${b##*/} $(cat $b/current_now) $(cat $b/voltage_now); done 2>/dev/null)"
+js pm_rfkill "$(for r in /sys/class/rfkill/*; do [ -e $r/name ] && printf '%s=%s ' $(cat $r/name) $(cat $r/soft); done 2>/dev/null)"
+printf '  "timestamp": "%s"\n}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

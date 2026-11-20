@@ -1,0 +1,17 @@
+[Unit]
+Description=Cardputer Zero LCD console (diagnostic UI, then login)
+After=nz-late.service systemd-user-sessions.service
+Conflicts=getty@tty1.service
+
+[Service]
+ExecStart=/usr/bin/nz-console tty1
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

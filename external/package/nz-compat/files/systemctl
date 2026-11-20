@@ -1,0 +1,52 @@
+#!/bin/sh
+# systemctl compatibility shim for Configuration A (BusyBox init, no systemd).
+# Translates the verbs used by M5Stack maintainer scripts and updaters to nz-unit.
+# It is deliberately small: anything else prints a notice and succeeds.
+USER_ARGS=; GLOBAL=0; QUIET=0; PROP=; VALUE=0; ARGS=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--user) USER_ARGS="--user $(id -u)" ;;
+	--global) GLOBAL=1 ;;
+	-q|--quiet) QUIET=1 ;;
+	--property=*) PROP=${1#--property=} ;;
+	-p) PROP=$2; shift ;;
+	--value) VALUE=1 ;;
+	--now|--no-block|--no-pager|--no-reload|-f|--force|--system) ;;
+	-*) ;;
+	*) ARGS="$ARGS $1" ;;
+	esac; shift
+done
+set -- $ARGS; VERB=$1; [ $# -gt 0 ] && shift
+ENDIR=/var/lib/nz-units/enabled
+rc=0
+case "$VERB" in
+daemon-reload|daemon-reexec|reset-failed|mask|unmask|preset|set-default) ;;
+start|stop|restart|try-restart|reload-or-restart)
+	[ "$VERB" = try-restart ] || [ "$VERB" = reload-or-restart ] && VERB=restart
+	for u; do case "$u" in user@*) continue ;; esac; nz-unit $USER_ARGS "$VERB" "$u" || rc=$?; done ;;
+is-active) for u; do nz-unit $USER_ARGS is-active "$u" || rc=3; done
+	[ $QUIET = 1 ] || { [ $rc = 0 ] && echo active || echo inactive; } ;;
+enable|disable)
+	[ $GLOBAL = 1 ] && exit 0
+	for u; do case "$u" in *.*) ;; *) u=$u.service ;; esac
+		d=$ENDIR/${USER_ARGS:+user-$(id -u)}; d=${d:-$ENDIR/system}; [ -n "$USER_ARGS" ] || d=$ENDIR/system
+		if [ "$VERB" = enable ]; then nz-rw sh -c 'mkdir -p "$1" 2>/dev/null && : > "$1/$2"' sh "$d" "$u"; else [ ! -e "$d/$u" ] || nz-rw rm -f "$d/$u"; fi
+	done ;;
+is-enabled) for u; do case "$u" in *.*) ;; *) u=$u.service ;; esac
+		[ -e "$ENDIR/system/$u" ] || [ -e "$ENDIR/user-$(id -u)/$u" ] || rc=1; done
+	[ $QUIET = 1 ] || { [ $rc = 0 ] && echo enabled || echo disabled; } ;;
+show)
+	for u; do pid=$(nz-unit $USER_ARGS main-pid "$u" 2>/dev/null || echo 0)
+		st=inactive; nz-unit $USER_ARGS is-active "$u" 2>/dev/null && st=active
+		for p in $(echo "${PROP:-MainPID,ActiveState}" | tr ',' ' '); do
+			case "$p" in MainPID) v=$pid ;; ActiveState) v=$st ;; SubState) [ $st = active ] && v=running || v=dead ;; *) v= ;; esac
+			[ $VALUE = 1 ] && echo "$v" || echo "$p=$v"
+		done
+	done ;;
+status) for u; do nz-unit $USER_ARGS is-active "$u" && echo "$u: active (pid $(nz-unit $USER_ARGS main-pid "$u"))" || { echo "$u: inactive"; rc=3; }; done ;;
+reboot) exec reboot ;;
+poweroff|halt) exec poweroff ;;
+""|list-units|list-unit-files) ls /run/nz-units/*/*.sup 2>/dev/null | sed 's/.*\///;s/\.sup$//' ;;
+*) echo "systemctl (nz shim): verb '$VERB' is not implemented; ignoring" >&2 ;;
+esac
+exit $rc

@@ -1,0 +1,678 @@
+From: NimbleZero <noreply@invalid>
+Subject: [PATCH] panel-mipi-dbi-m: TE sync, scan-order transfer, cached buffers, background sending
+
+Run-time switches (module parameters nz_path, nz_native, nz_te, nz_te_delay_us, nz_onemsg),
+sysfs attributes nz_stats and nz_dcs on the SPI device.  With all switches at their
+defaults (0) the stock update path is used and only its total time is recorded.
+The vendor's own TE code stays disabled; this adds a separate implementation that
+tolerates a missing or unusable te-gpios.
+
+nz_cached=1 (default 0): picture buffers created afterwards use normally cached memory
+instead of write-combined memory (hardware 2026-11-19: reading one frame out of the
+write-combined buffer costs 7-9 ms; with cached buffers 0.8-1.2 ms).  Falls back per
+buffer if the allocation fails.
+
+nz_async=1 (default 0): with nz_native and nz_te, the update call copies the frame and
+returns; a work item waits for TE and sends it.  The next update waits for that work.
+
+Partial updates in scan order (window computed per variant); updates of at least 1/16 of
+the screen start on TE.  nz_fbdev_ms sets the deferred-I/O delay of the fbdev emulation
+(kernel default 50 ms = 20 updates/s for /dev/fb0 programs).
+
+After five TE waits in a row without a pulse the driver stops waiting (te_given_up in
+nz_stats) until the panel is re-initialised.
+
+The image sets the switches in /etc/modprobe.d/nz-panel.conf; the module's own defaults
+remain the vendor behaviour.  Hardware results: docs/results/display-kit/.
+
+--- a/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-19 16:08:08.639456364 -0500
++++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-19 19:22:08.082653227 -0500
+@@ -9,18 +9,26 @@
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/property.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/spi/spi.h>
++#include <linux/workqueue.h>
+ 
+ #include <drm/clients/drm_client_setup.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_fbdev_dma.h>
++#include <drm/drm_fb_helper.h>
+ #include <drm/drm_gem_atomic_helper.h>
++#include <drm/drm_damage_helper.h>
++#include <drm/drm_framebuffer.h>
+ #include <drm/drm_gem_dma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_managed.h>
+ #include <drm/drm_mipi_dbi.h>
+ #include <drm/drm_modes.h>
+@@ -63,8 +71,81 @@
+      * struct completion te_completion;
+      */
+     struct mutex display_lock;		/* Serialize reset and display transfers */
++
++    /* NimbleZero: tearing-effect (TE) sync, native-order transfer, timing statistics */
++    struct gpio_desc *nz_te;
++    int nz_te_irq;
++    struct completion nz_te_done;
++    ktime_t nz_te_last;
++    u32 nz_te_period_us;		/* time between the last two TE pulses */
++    u64 nz_te_count;
++    u8 *nz_cmd;				/* DMA-safe byte for the write-memory command */
++    u8 nz_madctl;			/* value last written to the panel */
++    bool nz_force_full;
++    /* background sender (nz_async): one frame handed over at a time */
++    struct work_struct nz_work;
++    void *nz_abuf;			/* the frame being sent; NULL: not available */
++    void *nz_dst;			/* where the current copy goes: tx_buf or nz_abuf */
++    size_t nz_alen;
++    unsigned int nz_axs, nz_axe, nz_ays, nz_aye;
++    bool nz_ate;			/* this frame waits for the TE pulse */
++    unsigned int nz_te_miss;		/* TE waits in a row that timed out */
++    bool nz_te_off;			/* no pulses seen: stop waiting until the panel is re-initialised */
++    ktime_t nz_at0;
++    u32 nz_acopy_us;
++    struct {
++        u64 frames, full, te_waits, te_timeouts, async, native;
++        u64 copy_us, wait_us, window_us, burst_us, total_us;
++        u32 max_total_us;
++    } nz_st;
+ };
+ 
++/*
++ * NimbleZero run-time switches (/sys/module/panel_mipi_dbi_m/parameters/).
++ *   nz_path     0: the kernel's stock update path   1: the path below
++ *   nz_native   0: stock memory order (MADCTL 0xA0)
++ *               1..4: send the frame in the panel's own scan order (MADCTL 0x00), rotating
++ *                     it in software; the four values are the four possible orientations
++ *   nz_te       1: start every full frame on the panel's TE pulse (needs te-gpios)
++ *   nz_te_delay_us  wait this long after the pulse before sending pixels
++ *   nz_onemsg   1: send the pixel data as one SPI message (0: one message per chunk)
++ */
++static int nz_path;
++module_param(nz_path, int, 0644);
++static int nz_native;
++module_param(nz_native, int, 0644);
++static int nz_te;
++module_param(nz_te, int, 0644);
++static int nz_te_delay_us;
++module_param(nz_te_delay_us, int, 0644);
++static int nz_onemsg = 1;
++module_param(nz_onemsg, int, 0644);
++/*   nz_cached   1: picture buffers created from now on live in ordinary cached memory (default 0)
++ *               0: write-combined memory as in the vendor driver (reading a frame back
++ *                  out of it took 7-9 ms per frame on hardware, 2026-11-19)
++ * Takes effect for buffers created after the change (each program start). */
++static int nz_cached;
++module_param(nz_cached, int, 0644);
++/*   nz_async    1: with nz_native and nz_te on, a full frame is copied and handed to a
++ *                  background sender; the update call returns at once, so the program can
++ *                  draw its next frame while this one waits for the TE pulse and is sent.
++ *                  The next update waits until the previous frame has gone out. */
++static int nz_async;
++module_param(nz_async, int, 0644);
++#define NZ_ABUF_SIZE	(320 * 240 * 2)
++/*   nz_fbdev_ms  how long the console framebuffer layer (/dev/fb0: launcher, console, most
++ *                apps) collects changes before it passes them on.  0: the kernel's value
++ *                (50 ms = at most 20 updates per second).  Example: 16. */
++static int nz_fbdev_ms;
++module_param(nz_fbdev_ms, int, 0644);
++/* Updates in panel scan order that cover at least 1/NZ_TE_FRACTION of the screen start on
++ * the TE pulse; smaller ones (cursor, clock) are sent at once. */
++#define NZ_TE_FRACTION	16
++static u64 nz_buffers_cached, nz_buffers_wc;	/* picture buffers created so far, by kind */
++
++#define NZ_MADCTL_STOCK	0xA0
++#define NZ_MADCTL_NATIVE	0x00
++
+ static inline struct panel_mipi_dbi_device *
+ to_panel_mipi_dbi_device(struct mipi_dbi_dev *dbidev)
+ {
+@@ -276,13 +357,12 @@
+         return ret;
+ 
+     panel_mipi_dbi_commands_execute(dbi, dbidev->driver_private);
+-
+-    /* TE support is intentionally disabled; re-enable this with TE support. */
+-    /*
+-    if (panel->te)
+-        mipi_dbi_command(dbi, MIPI_DCS_SET_TEAR_ON,
+-                 MIPI_DCS_TEAR_MODE_VBLANK);
+-    */
++    panel->nz_madctl = NZ_MADCTL_STOCK;
++    panel->nz_force_full = true;
++    panel->nz_te_miss = 0;
++    panel->nz_te_off = false;
++    if (panel->nz_te)
++        mipi_dbi_command(dbi, 0x35 /* tearing effect line on */, 0x00 /* at vertical blanking */);
+ 
+     if (dbidev->regulator)
+         regulator_disable(dbidev->regulator);
+@@ -328,8 +408,80 @@
+ 
+ static DEVICE_ATTR(reset, 0200, NULL, panel_mipi_dbi_reset_store);
+ 
++/* NimbleZero: timing statistics since the last read (microseconds are averages per frame) */
++static ssize_t nz_stats_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    struct drm_device *drm = spi_get_drvdata(to_spi_device(dev));
++    struct panel_mipi_dbi_device *panel;
++    u64 n;
++    int len;
++
++    if (!drm)
++        return -ENODEV;
++    panel = to_panel_mipi_dbi_device(drm_to_mipi_dbi_dev(drm));
++    mutex_lock(&panel->display_lock);
++    n = panel->nz_st.frames ? panel->nz_st.frames : 1;
++    len = sysfs_emit(buf,
++        "path=%d native=%d te=%d te_delay_us=%d onemsg=%d madctl=0x%02x cached=%d async=%d fbdev_ms=%d buffers_cached=%llu buffers_wc=%llu\n"
++        "te_gpio=%s te_given_up=%d te_pulses=%llu te_period_us=%u\n"
++        "frames=%llu full=%llu scan_order=%llu te_waits=%llu te_timeouts=%llu async=%llu\n"
++        "avg_us: copy=%llu te_wait=%llu window=%llu burst=%llu total=%llu  max_total=%u\n",
++        nz_path, nz_native, nz_te, nz_te_delay_us, nz_onemsg, panel->nz_madctl,
++        nz_cached, nz_async, nz_fbdev_ms, nz_buffers_cached, nz_buffers_wc,
++        panel->nz_te ? "yes" : "no", panel->nz_te_off, panel->nz_te_count, panel->nz_te_period_us,
++        panel->nz_st.frames, panel->nz_st.full, panel->nz_st.native, panel->nz_st.te_waits, panel->nz_st.te_timeouts,
++        panel->nz_st.async,
++        div64_u64(panel->nz_st.copy_us, n), div64_u64(panel->nz_st.wait_us, n),
++        div64_u64(panel->nz_st.window_us, n), div64_u64(panel->nz_st.burst_us, n),
++        div64_u64(panel->nz_st.total_us, n), panel->nz_st.max_total_us);
++    memset(&panel->nz_st, 0, sizeof(panel->nz_st));
++    mutex_unlock(&panel->display_lock);
++    return len;
++}
++static DEVICE_ATTR_RO(nz_stats);
++
++/* NimbleZero: send one raw command to the panel, as hex bytes: "c6 0f" (experiments only) */
++static ssize_t nz_dcs_store(struct device *dev, struct device_attribute *attr,
++                const char *buf, size_t count)
++{
++    struct drm_device *drm = spi_get_drvdata(to_spi_device(dev));
++    struct panel_mipi_dbi_device *panel;
++    u8 b[17];
++    int n = 0, used, idx;
++    unsigned int v;
++    const char *p = buf;
++
++    if (!drm)
++        return -ENODEV;
++    while (n < (int)sizeof(b) && sscanf(p, " %x%n", &v, &used) == 1) {
++        if (v > 0xff)
++            return -EINVAL;
++        b[n++] = v;
++        p += used;
++    }
++    if (!n)
++        return -EINVAL;
++    panel = to_panel_mipi_dbi_device(drm_to_mipi_dbi_dev(drm));
++    if (!drm_dev_enter(drm, &idx))
++        return -ENODEV;
++    mutex_lock(&panel->display_lock);
++    if (n > 1)
++        mipi_dbi_command_stackbuf(&panel->dbidev.dbi, b[0], b + 1, n - 1);
++    else
++        mipi_dbi_command(&panel->dbidev.dbi, b[0]);
++    if (b[0] == MIPI_DCS_SET_ADDRESS_MODE && n > 1)
++        panel->nz_madctl = b[1];
++    panel->nz_force_full = true;
++    mutex_unlock(&panel->display_lock);
++    drm_dev_exit(idx);
++    return count;
++}
++static DEVICE_ATTR_WO(nz_dcs);
++
+ static struct attribute *panel_mipi_dbi_attrs[] = {
+     &dev_attr_reset.attr,
++    &dev_attr_nz_stats.attr,
++    &dev_attr_nz_dcs.attr,
+     NULL,
+ };
+ 
+@@ -393,13 +545,11 @@
+         goto out_exit;
+     if (!ret)
+         panel_mipi_dbi_commands_execute(dbi, dbidev->driver_private);
+-
+-    /* TE support is intentionally disabled; re-enable this with TE support. */
+-    /*
+-    if (panel->te)
+-        mipi_dbi_command(dbi, MIPI_DCS_SET_TEAR_ON,
+-                 MIPI_DCS_TEAR_MODE_VBLANK);
+-    */
++    panel->nz_madctl = NZ_MADCTL_STOCK;
++    panel->nz_force_full = true;
++    /* the tear mode is cheap to set and may have been lost with a reset */
++    if (panel->nz_te)
++        mipi_dbi_command(dbi, 0x35 /* tearing effect line on */, 0x00 /* at vertical blanking */);
+ 
+     mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
+ out_exit:
+@@ -407,15 +557,316 @@
+     drm_dev_exit(idx);
+ }
+ 
++/* ---- NimbleZero update path -------------------------------------------------------- */
++
++static irqreturn_t nz_te_isr(int irq, void *data)
++{
++    struct panel_mipi_dbi_device *panel = data;
++    ktime_t now = ktime_get();
++
++    s64 d = ktime_us_delta(now, panel->nz_te_last);
++
++    if (d > 0 && d < 100000)		/* longer gaps: panel was being re-initialised */
++        panel->nz_te_period_us = (u32)d;
++    panel->nz_te_last = now;
++    panel->nz_te_count++;
++    complete(&panel->nz_te_done);
++    return IRQ_HANDLED;
++}
++
++/*
++ * Copy part of the RGB565 framebuffer (320x170, as the applications see it) into the
++ * transfer buffer in the panel's own order (big-endian): panel lines run along the
++ * framebuffer's x axis, pixels within a line along its y axis.  variant 1..4 selects
++ * which way the two axes run.  Returns the panel window (line r0..r1, pixel c0..c1).
++ */
++static void nz_copy_native(struct panel_mipi_dbi_device *panel, const struct iosys_map *src,
++               struct drm_framebuffer *fb, const struct drm_rect *rect, int variant,
++               unsigned int *r0, unsigned int *r1, unsigned int *c0, unsigned int *c1)
++{
++    const u8 *base = src->vaddr + fb->offsets[0];
++    unsigned int W = fb->width, H = fb->height, pitch = fb->pitches[0];
++    bool flipx = variant == 2 || variant == 4, flipy = variant == 3 || variant == 4;
++    u16 *dst = panel->nz_dst;
++    unsigned int r, c;
++
++    *r0 = flipx ? W - rect->x2 : rect->x1;
++    *r1 = flipx ? W - 1 - rect->x1 : rect->x2 - 1;
++    *c0 = flipy ? H - rect->y2 : rect->y1;
++    *c1 = flipy ? H - 1 - rect->y1 : rect->y2 - 1;
++
++    for (r = *r0; r <= *r1; r++) {
++        unsigned int x = flipx ? W - 1 - r : r;
++
++        for (c = *c0; c <= *c1; c++) {
++            unsigned int y = flipy ? H - 1 - c : c;
++
++            *dst++ = swab16(*(const u16 *)(base + y * pitch + x * 2));
++        }
++    }
++}
++
++/* Pixel data: command byte, then the buffer, as one SPI message (or chunk by chunk). */
++static int nz_write_memory(struct panel_mipi_dbi_device *panel, const void *buf, size_t len)
++{
++    struct mipi_dbi *dbi = &panel->dbidev.dbi;
++    struct spi_device *spi = dbi->spi;
++    size_t max_chunk = ALIGN_DOWN(spi_max_transfer_size(spi), 2);
++    struct spi_transfer tr[4] = { };
++    struct spi_message m;
++    int ret, n = 0;
++
++    if (!nz_onemsg || DIV_ROUND_UP(len, max_chunk) > ARRAY_SIZE(tr))
++        return mipi_dbi_command_buf(dbi, MIPI_DCS_WRITE_MEMORY_START, (u8 *)buf, len);
++
++    mutex_lock(&dbi->cmdlock);
++    spi_bus_lock(spi->controller);
++    panel->nz_cmd[0] = MIPI_DCS_WRITE_MEMORY_START;
++    gpiod_set_value_cansleep(dbi->dc, 0);
++    ret = mipi_dbi_spi_transfer(spi, mipi_dbi_spi_cmd_max_speed(spi, 1), 8, panel->nz_cmd, 1);
++    if (ret)
++        goto out;
++    gpiod_set_value_cansleep(dbi->dc, 1);
++    spi_message_init(&m);
++    while (len) {
++        size_t chunk = min(len, max_chunk);
++
++        tr[n].tx_buf = buf;
++        tr[n].len = chunk;
++        tr[n].bits_per_word = 8;
++        spi_message_add_tail(&tr[n], &m);
++        buf += chunk;
++        len -= chunk;
++        n++;
++    }
++    ret = spi_sync_locked(spi, &m);
++out:
++    spi_bus_unlock(spi->controller);
++    mutex_unlock(&dbi->cmdlock);
++    return ret;
++}
++
++/* Wait for the next TE pulse.  A device whose TE line is not connected (or a panel that
++ * does not drive it) would cost 60 ms per frame here; after five misses in a row the
++ * driver stops waiting and sends unsynchronised until the panel is re-initialised. */
++static bool nz_wait_te(struct panel_mipi_dbi_device *panel)
++{
++    if (panel->nz_te_off)
++        return false;
++    reinit_completion(&panel->nz_te_done);
++    panel->nz_st.te_waits++;
++    if (wait_for_completion_timeout(&panel->nz_te_done, msecs_to_jiffies(60))) {
++        panel->nz_te_miss = 0;
++        return true;
++    }
++    panel->nz_st.te_timeouts++;
++    if (++panel->nz_te_miss >= 5) {
++        panel->nz_te_off = true;
++        dev_warn(panel->dbidev.drm.dev, "no pulses on the TE pin; sending without synchronisation\n");
++    }
++    return false;
++}
++
++/* Background sender: waits for the TE pulse and sends the frame in nz_abuf.  It holds
++ * display_lock like every other user of the panel; updates wait for it with flush_work()
++ * BEFORE taking that lock. */
++static void nz_send_work(struct work_struct *work)
++{
++    struct panel_mipi_dbi_device *panel = container_of(work, struct panel_mipi_dbi_device, nz_work);
++    struct mipi_dbi *dbi = &panel->dbidev.dbi;
++    ktime_t t1, t2, t3, t4;
++    u32 total;
++    int idx, ret;
++
++    if (!drm_dev_enter(&panel->dbidev.drm, &idx))
++        return;
++    mutex_lock(&panel->display_lock);
++    /* the panel was reset or switched back since the hand-over: drop this frame, the
++     * next update is a forced full one */
++    if (panel->nz_madctl != NZ_MADCTL_NATIVE || !panel->nz_alen || panel->nz_alen > NZ_ABUF_SIZE)
++        goto out;
++    t1 = ktime_get();
++    if (panel->nz_ate)
++        nz_wait_te(panel);
++    t2 = ktime_get();
++    mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS, panel->nz_axs >> 8, panel->nz_axs & 0xff,
++             panel->nz_axe >> 8, panel->nz_axe & 0xff);
++    mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS, panel->nz_ays >> 8, panel->nz_ays & 0xff,
++             panel->nz_aye >> 8, panel->nz_aye & 0xff);
++    t3 = ktime_get();
++    ret = nz_write_memory(panel, panel->nz_abuf, panel->nz_alen);
++    t4 = ktime_get();
++    if (ret)
++        drm_err_once(&panel->dbidev.drm, "Failed to update display %d\n", ret);
++
++    panel->nz_st.frames++;
++    panel->nz_st.full += panel->nz_alen == (size_t)panel->dbidev.mode.hdisplay * panel->dbidev.mode.vdisplay * 2;
++    panel->nz_st.native++;
++    panel->nz_st.async++;
++    panel->nz_st.copy_us += panel->nz_acopy_us;
++    panel->nz_st.wait_us += ktime_us_delta(t2, t1);
++    panel->nz_st.window_us += ktime_us_delta(t3, t2);
++    panel->nz_st.burst_us += ktime_us_delta(t4, t3);
++    total = (u32)ktime_us_delta(t4, panel->nz_at0);	/* hand-over to last pixel */
++    panel->nz_st.total_us += total;
++    if (total > panel->nz_st.max_total_us)
++        panel->nz_st.max_total_us = total;
++out:
++    panel->nz_alen = 0;
++    mutex_unlock(&panel->display_lock);
++    drm_dev_exit(idx);
++}
++
++static void nz_fb_dirty(struct panel_mipi_dbi_device *panel, struct iosys_map *src,
++            struct drm_framebuffer *fb, struct drm_rect *rect,
++            struct drm_format_conv_state *fmtcnv_state)
++{
++    struct mipi_dbi_dev *dbidev = &panel->dbidev;
++    struct mipi_dbi *dbi = &dbidev->dbi;
++    int native = fb->format->format == DRM_FORMAT_RGB565 ? nz_native : 0;
++    u8 madctl = native ? NZ_MADCTL_NATIVE : NZ_MADCTL_STOCK;
++    ktime_t t0 = ktime_get(), t1, t2, t3, t4;
++    unsigned int xs, xe, ys, ye;
++    bool full, async, te_sync;
++    unsigned int r0, r1, c0, c1;
++    size_t len;
++    u32 total;
++    int ret = 0;
++
++    if (native < 0 || native > 4)
++        native = 0;
++    async = nz_async && native && panel->nz_abuf &&
++        (size_t)fb->width * fb->height * 2 <= NZ_ABUF_SIZE;
++    panel->nz_dst = async ? panel->nz_abuf : dbidev->tx_buf;
++    if (madctl != panel->nz_madctl) {
++        mipi_dbi_command(dbi, MIPI_DCS_SET_ADDRESS_MODE, madctl);
++        panel->nz_madctl = madctl;
++        panel->nz_force_full = true;
++    }
++    if (panel->nz_force_full) {
++        rect->x1 = 0; rect->y1 = 0; rect->x2 = fb->width; rect->y2 = fb->height;
++        panel->nz_force_full = false;
++    }
++    full = drm_rect_width(rect) == fb->width && drm_rect_height(rect) == fb->height;
++
++    if (native) {
++        ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
++        if (ret)
++            goto err;
++        nz_copy_native(panel, src, fb, rect, native, &r0, &r1, &c0, &c1);
++        drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
++        /* panel memory: 240 columns, the glass shows 170 of them starting at top_offset */
++        xs = dbidev->top_offset + c0; xe = dbidev->top_offset + c1;
++        ys = dbidev->left_offset + r0; ye = dbidev->left_offset + r1;
++        len = (size_t)(r1 - r0 + 1) * (c1 - c0 + 1) * 2;
++        panel->nz_st.native += !async;
++    } else {
++        ret = mipi_dbi_buf_copy(dbidev->tx_buf, src, fb, rect, true, fmtcnv_state);
++        if (ret)
++            goto err;
++        xs = rect->x1 + dbidev->left_offset; xe = rect->x2 - 1 + dbidev->left_offset;
++        ys = rect->y1 + dbidev->top_offset; ye = rect->y2 - 1 + dbidev->top_offset;
++        len = (size_t)drm_rect_width(rect) * drm_rect_height(rect) * 2;
++    }
++    t1 = ktime_get();
++    /* In scan order a write that starts on the TE pulse stays ahead of the panel's own
++     * scan wherever it begins, so partial updates can be synchronised too. */
++    te_sync = nz_te && panel->nz_te &&
++          (native ? len * NZ_TE_FRACTION >= (size_t)fb->width * fb->height * 2 : full);
++
++    if (async) {
++        /* hand the frame to the background sender and return */
++        panel->nz_axs = xs; panel->nz_axe = xe; panel->nz_ays = ys; panel->nz_aye = ye;
++        panel->nz_alen = len;
++        panel->nz_ate = te_sync;
++        panel->nz_at0 = t0;
++        panel->nz_acopy_us = (u32)ktime_us_delta(t1, t0);
++        queue_work(system_highpri_wq, &panel->nz_work);
++        return;
++    }
++
++    if (te_sync) {
++        if (nz_wait_te(panel) && nz_te_delay_us > 0 && nz_te_delay_us <= 20000)
++            usleep_range(nz_te_delay_us, nz_te_delay_us + 50);
++    }
++    t2 = ktime_get();
++
++    mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS, xs >> 8, xs & 0xff, xe >> 8, xe & 0xff);
++    mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS, ys >> 8, ys & 0xff, ye >> 8, ye & 0xff);
++    t3 = ktime_get();
++
++    ret = nz_write_memory(panel, dbidev->tx_buf, len);
++    t4 = ktime_get();
++
++    panel->nz_st.frames++;
++    panel->nz_st.full += full;
++    panel->nz_st.copy_us += ktime_us_delta(t1, t0);
++    panel->nz_st.wait_us += ktime_us_delta(t2, t1);
++    panel->nz_st.window_us += ktime_us_delta(t3, t2);
++    panel->nz_st.burst_us += ktime_us_delta(t4, t3);
++    total = (u32)ktime_us_delta(t4, t0);
++    panel->nz_st.total_us += total;
++    if (total > panel->nz_st.max_total_us)
++        panel->nz_st.max_total_us = total;
++err:
++    if (ret)
++        drm_err_once(fb->dev, "Failed to update display %d\n", ret);
++}
++
++/* NimbleZero: pacing of the console framebuffer layer (see nz_fbdev_ms) */
++static void nz_apply_fbdev_rate(struct drm_device *drm)
++{
++    struct drm_fb_helper *fh = drm->fb_helper;
++    unsigned long want;
++
++    if (!fh || !fh->info || !fh->info->fbdefio)
++        return;
++    want = nz_fbdev_ms > 0 && nz_fbdev_ms <= 1000 ? max(1UL, msecs_to_jiffies(nz_fbdev_ms)) : HZ / 20;
++    if (fh->fbdefio.delay != want)
++        fh->fbdefio.delay = want;
++}
++
+ /* Update callback remains locked to serialize normal transfers with reset. */
+ static void panel_mipi_dbi_pipe_update(struct drm_simple_display_pipe *pipe,
+                        struct drm_plane_state *old_state)
+ {
+     struct mipi_dbi_dev *dbidev = drm_to_mipi_dbi_dev(pipe->crtc.dev);
+     struct panel_mipi_dbi_device *panel = to_panel_mipi_dbi_device(dbidev);
++    struct drm_plane_state *state = pipe->plane.state;
++    struct drm_shadow_plane_state *shadow = to_drm_shadow_plane_state(state);
++    struct drm_framebuffer *fb = state->fb;
++    struct drm_rect rect;
++    int idx;
+ 
++    nz_apply_fbdev_rate(pipe->crtc.dev);
++    flush_work(&panel->nz_work);	/* the previous frame must be out before this one is copied */
+     mutex_lock(&panel->display_lock);
+-    mipi_dbi_pipe_update(pipe, old_state);
++    if (!nz_path && panel->nz_madctl == NZ_MADCTL_STOCK && !panel->nz_force_full) {
++        ktime_t t0 = ktime_get();
++        u32 total;
++
++        mipi_dbi_pipe_update(pipe, old_state);
++        /* statistics for the stock path too: only the total is known */
++        total = (u32)ktime_us_delta(ktime_get(), t0);
++        panel->nz_st.frames++;
++        panel->nz_st.total_us += total;
++        if (total > panel->nz_st.max_total_us)
++            panel->nz_st.max_total_us = total;
++    } else if (pipe->crtc.state->active && fb && drm_dev_enter(fb->dev, &idx)) {
++        /* leaving the NimbleZero path: one more frame through it restores the stock order */
++        if (drm_atomic_helper_damage_merged(old_state, state, &rect) || panel->nz_force_full) {
++            if (!nz_path) {
++                int keep = nz_native;
++
++                nz_native = 0;
++                nz_fb_dirty(panel, &shadow->data[0], fb, &rect, &shadow->fmtcnv_state);
++                nz_native = keep;
++            } else {
++                nz_fb_dirty(panel, &shadow->data[0], fb, &rect, &shadow->fmtcnv_state);
++            }
++        }
++        drm_dev_exit(idx);
++    }
+     mutex_unlock(&panel->display_lock);
+ }
+ 
+@@ -424,6 +875,7 @@
+     struct mipi_dbi_dev *dbidev = drm_to_mipi_dbi_dev(pipe->crtc.dev);
+     struct panel_mipi_dbi_device *panel = to_panel_mipi_dbi_device(dbidev);
+ 
++    flush_work(&panel->nz_work);
+     mutex_lock(&panel->display_lock);
+     mipi_dbi_pipe_disable(pipe);
+     mutex_unlock(&panel->display_lock);
+@@ -437,10 +889,53 @@
+ 
+ DEFINE_DRM_GEM_DMA_FOPS(panel_mipi_dbi_fops);
+ 
++/* NimbleZero: cached picture buffers.  The GEM DMA helper allocates write-combined memory
++ * unless the object asks for "non-coherent" (= normally cached) memory.  Nothing here
++ * hands the buffer to a device for DMA - every frame is copied into tx_buf first - so no
++ * cache synchronisation is needed.  If the cached allocation fails, fall back once to the
++ * vendor behaviour for that buffer. */
++static DEFINE_MUTEX(nz_create_lock);
++static bool nz_create_cached;
++
++static struct drm_gem_object *nz_gem_create_object(struct drm_device *drm, size_t size)
++{
++    struct drm_gem_dma_object *obj = kzalloc(sizeof(*obj), GFP_KERNEL);
++
++    if (!obj)
++        return ERR_PTR(-ENOMEM);
++    obj->map_noncoherent = nz_create_cached;
++    return &obj->base;
++}
++
++static int nz_dumb_create(struct drm_file *file, struct drm_device *drm,
++              struct drm_mode_create_dumb *args)
++{
++    int ret;
++
++    mutex_lock(&nz_create_lock);
++    nz_create_cached = nz_cached != 0;
++    ret = drm_gem_dma_dumb_create(file, drm, args);
++    if (ret && nz_create_cached) {
++        dev_warn_once(drm->dev, "cached picture buffer failed (%d); using write-combined memory\n", ret);
++        nz_create_cached = false;
++        ret = drm_gem_dma_dumb_create(file, drm, args);
++    }
++    if (!ret) {
++        if (nz_create_cached)
++            nz_buffers_cached++;
++        else
++            nz_buffers_wc++;
++    }
++    nz_create_cached = false;
++    mutex_unlock(&nz_create_lock);
++    return ret;
++}
++
+ static const struct drm_driver panel_mipi_dbi_driver = {
+     .driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
+     .fops			= &panel_mipi_dbi_fops,
+-    DRM_GEM_DMA_DRIVER_OPS_VMAP,
++    DRM_GEM_DMA_DRIVER_OPS_VMAP_WITH_DUMB_CREATE(nz_dumb_create),
++    .gem_create_object	= nz_gem_create_object,
+     DRM_FBDEV_DMA_DRIVER_OPS,
+     .debugfs_init		= mipi_dbi_debugfs_init,
+     .name			= "panel-mipi-dbi",
+@@ -576,6 +1071,30 @@
+     }
+ #endif
+ 
++    /* NimbleZero: optional TE pin ("te-gpios"); the interrupt only records and signals */
++    panel->nz_cmd = devm_kzalloc(dev, 4, GFP_KERNEL);
++    if (!panel->nz_cmd)
++        return -ENOMEM;
++    panel->nz_madctl = NZ_MADCTL_STOCK;
++    init_completion(&panel->nz_te_done);
++    INIT_WORK(&panel->nz_work, nz_send_work);
++    panel->nz_abuf = devm_kmalloc(dev, NZ_ABUF_SIZE, GFP_KERNEL);	/* NULL: nz_async stays off */
++    panel->nz_te = devm_gpiod_get_optional(dev, "te", GPIOD_IN);
++    if (IS_ERR(panel->nz_te)) {
++        dev_warn(dev, "TE pin not usable (%ld); continuing without it\n", PTR_ERR(panel->nz_te));
++        panel->nz_te = NULL;
++    }
++    if (panel->nz_te) {
++        panel->nz_te_irq = gpiod_to_irq(panel->nz_te);
++        ret = panel->nz_te_irq < 0 ? panel->nz_te_irq :
++              devm_request_irq(dev, panel->nz_te_irq, nz_te_isr, IRQF_TRIGGER_RISING,
++                       "nz-panel-te", panel);
++        if (ret) {
++            dev_warn(dev, "TE interrupt not available (%d); continuing without it\n", ret);
++            panel->nz_te = NULL;
++        }
++    }
++
+     dbidev->driver_private = panel_mipi_dbi_commands_from_fw(dev);
+     if (IS_ERR(dbidev->driver_private))
+         return PTR_ERR(dbidev->driver_private);
+@@ -620,6 +1139,7 @@
+ 
+     drm_dev_unplug(drm);
+     drm_atomic_helper_shutdown(drm);
++    cancel_work_sync(&to_panel_mipi_dbi_device(drm_to_mipi_dbi_dev(drm))->nz_work);
+ }
+ 
+ static void panel_mipi_dbi_spi_shutdown(struct spi_device *spi)

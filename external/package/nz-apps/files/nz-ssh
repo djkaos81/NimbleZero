@@ -1,0 +1,6 @@
+#!/bin/sh
+# nz-ssh - small front end for the Dropbear SSH client.
+printf "ssh to (user@host[:port], empty = cancel): "; read -r t; [ -n "$t" ] || exit 0
+p=22; case "$t" in *:*) p=${t##*:}; t=${t%:*} ;; esac
+dbclient -p "$p" "$t"
+printf "\n[connection closed] Press Enter "; read -r _

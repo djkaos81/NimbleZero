@@ -1,0 +1,26 @@
+#!/bin/sh
+# SSH server (Dropbear).  It runs only when
+#   - the Services menu has not switched it off (/data/etc/nz/ssh is not "off"), and
+#   - user "zero" has a password (set at first boot or in the Options menu).
+# root can never log in over SSH (-w).
+PID=/var/run/dropbear.pid
+has_password() { h=$(sed -n 's/^zero:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null); case "$h" in '$'*) return 0 ;; esac; return 1; }
+start() {
+	if [ "$(cat /data/etc/nz/ssh 2>/dev/null)" = off ]; then echo "SSH server: switched off"; return 0; fi
+	if ! has_password; then echo "SSH server: off until a password is set for user zero"; return 0; fi
+	mkdir -p /data/etc/dropbear; chmod 700 /data/etc/dropbear
+	printf "Starting dropbear sshd: "; umask 077
+	start-stop-daemon -S -q -p $PID --exec /usr/sbin/dropbear -- -R -w
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+}
+stop() {
+	[ -f $PID ] || return 0
+	printf "Stopping dropbear sshd: "; start-stop-daemon -K -q -p $PID; [ $? = 0 ] && echo "OK" || echo "FAIL"
+}
+case "$1" in
+start) start ;;
+stop) stop ;;
+restart|reload) stop; sleep 1; start ;;
+status) [ -f $PID ] && [ -d "/proc/$(cat $PID)" ] ;;
+*) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

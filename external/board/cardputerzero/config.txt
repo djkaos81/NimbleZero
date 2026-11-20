@@ -1,0 +1,39 @@
+# NimbleZero - firmware configuration (see docs/BOOT.md)
+# Recovery: if this image does not boot, rename config-safe.txt to config.txt
+# on a PC (FAT partition) for the most conservative settings + verbose console.
+arm_64bit=1
+kernel=Image
+disable_overscan=1
+disable_splash=1
+boot_delay=0
+enable_uart=1
+camera_auto_detect=0
+gpu_mem=32
+# No HDMI on this board: without this the firmware framebuffer becomes fb0, takes the
+# console, and the SPI panel (then fb1) is never switched on.
+max_framebuffers=0
+
+dtparam=i2c_arm=on
+dtparam=i2s=on
+dtparam=spi=on
+dtparam=audio=off
+
+# USB OTG controller (host/peripheral)
+dtoverlay=dwc2
+
+# Cardputer Zero board (production "v0.5" hardware): LCD, keyboard, audio,
+# IO expander, RTC, LEDs, power-fail; battery gauge; IMU + magnetometer
+dtoverlay=cardputerzero-v5-overlay
+# LCD: 100 MHz SPI clock (vendor: 60, which the Pi turns into 50) and the panel's sync
+# output on GPIO 5.  Both must stay BELOW the board overlay.  See docs/DISPLAY.md.
+dtoverlay=nz-panel-100m
+dtoverlay=nz-panel-te
+dtoverlay=bq27220_v5
+dtoverlay=bmi270_bmm150_overlay
+
+# Infrared receiver / transmitter
+dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up
+dtoverlay=gpio-ir-tx,gpio_pin=12
+
+# IMX219 camera (full model only; harmless on Lite)
+dtoverlay=imx219

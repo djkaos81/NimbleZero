@@ -1,0 +1,15 @@
+applaunch|launcher|M5 Launcher|M5Stack's own launcher (APPLaunch) with its apps
+m5cardputerzero-compass|Compass|Compass|Compass app (IMU)
+m5cardputerzero-ir-remote|IR-Remote|IR Remote|Learn and send infrared remote codes
+m5cardputerzero-ir-chat|IR-Chat|IR Chat|Chat with another Cardputer Zero over infrared
+m5cardputerzero-files|Files|Files|File manager
+m5cardputerzero-music|Music|Music|Music player
+m5cardputerzero-recorder|Recorder|Recorder|Voice recorder
+m5cardputerzero-piano|Piano|Piano|Play piano on the keyboard
+m5cardputerzero-keyboard-guide|Keyboard-Guide|Keyboard Guide|Shows the keyboard layers
+camera|Camera|Camera|M5Stack camera app
+factorytest|FactoryTest|Factory Test|M5Stack hardware test
+m5cardputerzero-cap-cc1101-subg-chat|Cap-CC1101-SubG-Chat|CC1101 SubG Chat|Needs the Cap CC1101 module
+m5cardputerzero-cap-cc1101-nfc|Cap-CC1101-NFC|CC1101 NFC|Needs the Cap CC1101 module
+m5cardputerzero-cap-lora-1262|Cap-LoRa-1262|LoRa 1262|Needs the Cap LoRa-1262 module
+m5cardputerzero-cap-lora-1262-gps|Cap-LoRa-1262-GPS|LoRa 1262 GPS|Needs the Cap LoRa-1262 module

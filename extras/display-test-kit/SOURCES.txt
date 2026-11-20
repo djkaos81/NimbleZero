@@ -1,0 +1,11 @@
+Sources for the binaries in ../files
+  panel-mipi-dbi-m.test.ko   vendor driver (github.com/m5stack/m5stack-linux-dtoverlays, commit
+                             4f7aeee9fc103ebb03d22cac476bb191ecfb321e, modules/st7789v-1.0, GPL-2.0;
+                             already in your "sources" folder) + 0001-panel-nz-te-native-stats.patch
+  panel-mipi-dbi-m.stock.ko  the same driver without the patch, as shipped in rc10
+  nz-doom                    doomgeneric-e257a09.tar.gz (github.com/ozkl/doomgeneric, GPL-2.0)
+                             + doomgeneric_nz.c, built with build.sh
+  nz-paneltest               nz-paneltest.c
+  nz-panel-*.dtbo            the .dts files here (dtc -@ -I dts -O dtb)
+Compiler: Bootlin aarch64 glibc stable-2025.08-1 (gcc 14.3.0), as for rc10.
+Freedoom 0.13.0 game data: github.com/freedoom/freedoom, release v0.13.0, unmodified freedoom1.wad.

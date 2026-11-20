@@ -1,0 +1,100 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# nz-options - settings menu of the launcher (launcher: Options, or key O).
+# Settings are stored on the data partition (/data/etc/nz) by the nz-admin helper.
+A="sudo -n /usr/sbin/nz-admin"; [ "$(id -u)" = 0 ] && A=/usr/sbin/nz-admin
+TAB=$(printf '\t')
+pause() { printf '\nPress Enter '; IFS= read -r _; }
+val() { printf '%s\n' "$S" | sed -n "s/^$1=//p"; }
+pick() { nz-pick "$@"; }   # prints the row number
+ssid() { sed -n 's/^[[:space:]]*ssid="\(.*\)"[[:space:]]*$/\1/p' /data/etc/wpa_supplicant.conf 2>/dev/null | head -n1; }
+secs() { case "$1" in 0) echo never ;; *) [ "$1" -ge 120 ] && echo "$(( $1 / 60 )) min" || echo "$1 s" ;; esac; }
+
+brightness() {
+	n=$(printf '%s\n' 10% 20% 30% 40% 50% 60% 70% 80% 90% 100% | pick "Brightness") || return
+	$A set brightness $(( n * 10 ))
+}
+screen_off() {
+	set -- 30 60 120 300 600 1800 0
+	n=$(printf '%s\n' "30 seconds" "1 minute" "2 minutes" "5 minutes" "10 minutes" "30 minutes" "Never" | pick "Screen off after") || return
+	eval "$A set screen-off \${$n}"
+}
+volume() {
+	n=$(printf '%s\n' "Mute" 10% 20% 30% 40% 50% 60% 70% 80% 90% 100% | pick "Volume") || return
+	$A set volume $(( (n - 1) * 10 )) || { clear; echo "No volume control was found on the sound card."; pause; }
+}
+country() {
+	L="US United States|CA Canada|GB United Kingdom|DE Germany|FR France|ES Spain|IT Italy|NL Netherlands|SE Sweden|PL Poland|AU Australia|NZ New Zealand|JP Japan|KR South Korea|CN China|TW Taiwan|IN India|BR Brazil|MX Mexico|ZA South Africa|00 World default (most restrictive)|-- Other: type the two-letter code"
+	n=$(printf '%s\n' "$L" | tr '|' '\n' | pick "Wi-Fi country") || return
+	c=$(printf '%s\n' "$L" | tr '|' '\n' | sed -n "${n}p" | cut -c1-2)
+	if [ "$c" = -- ]; then
+		clear; printf 'Two-letter country code (ISO 3166, e.g. CH): '; IFS= read -r c
+		c=$(printf '%s' "$c" | tr 'a-z' 'A-Z')
+	fi
+	[ -n "$c" ] || return
+	$A set wifi-country "$c" || pause
+}
+timezone() {
+	Z=/usr/share/zoneinfo
+	R="Etc/UTC America Europe Asia Africa Australia Pacific Atlantic Indian Antarctica Etc"
+	n=$(printf '%s\n' $R | pick "Time zone: region") || return
+	r=$(printf '%s\n' $R | sed -n "${n}p")
+	if [ "$r" = Etc/UTC ]; then $A set timezone Etc/UTC; return; fi
+	( cd $Z/$r 2>/dev/null && find . -type f | sed 's|^\./||' | sort ) > /tmp/nz-tz.$$
+	n=$(pick "Time zone: $r" < /tmp/nz-tz.$$) && $A set timezone "$r/$(sed -n "${n}p" /tmp/nz-tz.$$)"
+	rm -f /tmp/nz-tz.$$
+}
+launcher() {
+	n=$(printf '%s\n' "NimbleZero launcher${TAB}${TAB}this launcher" "M5 launcher${TAB}${TAB}M5Stack APPLaunch (install it from the Store)" | pick "Launcher at start") || return
+	if [ $n = 2 ]; then
+		[ "$(val m5-launcher)" = installed ] || { clear; echo "The M5 launcher is not installed."; echo "Install it first: Store > M5 Launcher."; pause; return; }
+		$A set launcher m5; clear; echo "The M5 launcher starts at the next boot."; echo "To come back: SSH in and run"; echo "  sudo nz-admin set launcher native"; pause
+	else $A set launcher native; fi
+}
+about() {
+	clear
+	. /etc/nz-release 2>/dev/null
+	echo "NimbleZero $VERSION ($VARIANT)"
+	echo "Built $BUILD_DATE, Linux $KERNEL"
+	echo "Unofficial firmware for the M5Stack"
+	echo "Cardputer Zero. Not an M5Stack product."
+	echo "Licence: GPL-2.0; other parts under"
+	echo "their own licences: /usr/share/licenses"
+	echo
+	echo "Address : $(ip -4 addr show wlan0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n1)"
+	echo "Battery : $(cat /sys/class/power_supply/*/capacity 2>/dev/null | head -n1)%"
+	echo "System  : $(df -h / | awk 'END{print $3" used, "$4" free"}')"
+	echo "Data    : $(df -h /data | awk 'END{print $3" used, "$4" free"}')"
+	echo "Memory  : $(free -m | awk '/^Mem/{print $3" MB used of "$2" MB"}')"
+	pause
+}
+
+pos=1
+while :; do
+	S=$($A status)
+	b=$(val brightness); max=$(cat /sys/class/backlight/*/max_brightness 2>/dev/null | head -n1)
+	case "$b" in ''|*[!0-9]*) bt= ;; *) bt="$(( b * 100 / ${max:-100} ))%" ;; esac
+	[ "$(val launcher)" = m5 ] && lt="M5" || lt="NimbleZero"
+	n=$(printf '%s\n' \
+		"Brightness$TAB$bt" \
+		"Screen off after$TAB$(secs "$(val screen-off)")" \
+		"Volume$TAB$(val volume)" \
+		"Wi-Fi network$TAB$(ssid | cut -c1-14)${TAB}choose, replace or forget a network" \
+		"Wi-Fi country$TAB$(val wifi-country)${TAB}sets the legal channels and power" \
+		"Time zone$TAB$(val timezone | sed 's|.*/||' | cut -c1-14)" \
+		"Launcher at start$TAB$lt" \
+		"Boot log$TAB$(val bootlog)${TAB}nz-logs/ on the boot partition" \
+		"Password$TAB$(val password)${TAB}for SSH and sudo (user zero)" \
+		"Services$TAB$TAB${TAB}SSH server, network time" \
+		"About$TAB$TAB${TAB}version, address, storage" \
+		"Erase all data$TAB$TAB${TAB}back to a fresh install" | pick -s $pos "Options" "Enter:change  F/X:move  Esc:back") || exit 0
+	pos=$n
+	case $n in
+	1) brightness ;; 2) screen_off ;; 3) volume ;; 4) $A wifi ;; 5) country ;; 6) timezone ;; 7) launcher ;;
+	8) [ "$(val bootlog)" = on ] && $A set bootlog off || $A set bootlog on ;;
+	9) clear; $A set-password; pause ;;
+	10) nz-services ;;
+	11) about ;;
+	12) clear; $A erase-data; pause ;;
+	esac
+done

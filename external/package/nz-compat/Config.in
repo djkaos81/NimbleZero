@@ -1,0 +1,17 @@
+config BR2_PACKAGE_NZ_COMPAT
+	bool "nz-compat (M5Stack package compatibility layer)"
+	select BR2_PACKAGE_DPKG
+	help
+	  Makes unmodified M5Stack .deb packages installable and
+	  runnable on this Buildroot system: seeds the dpkg database
+	  with the firmware-provided runtime, protects firmware files
+	  from dpkg, creates the UID 1000 user and installs the device
+	  aliases the M5Stack software expects.
+
+config BR2_PACKAGE_NZ_COMPAT_SHIMS
+	bool "service shims for BusyBox init (Configuration A)"
+	depends on BR2_PACKAGE_NZ_COMPAT
+	depends on !BR2_INIT_SYSTEMD
+	help
+	  systemctl/loginctl shims and the nz-unit runner, for images
+	  without systemd.

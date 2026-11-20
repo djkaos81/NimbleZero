@@ -1,0 +1,9 @@
+Prebuilt cross toolchain: Bootlin aarch64--glibc--stable-2025.08-1
+(https://toolchains.bootlin.com). Its C library and compiler runtime libraries are
+copied into the NimbleZero image:
+  glibc (libc, libm, ld.so, ...)        LGPL-2.1+            COPYING.LIB
+  libgcc, libstdc++, libatomic          GPL-3.0 with the GCC Runtime Library Exception
+                                        COPYING3 + COPYING.RUNTIME
+summary.csv is Bootlin's own manifest for this toolchain: every component with its
+version, licence and upstream source archive. Bootlin mirrors those archives at
+https://toolchains.bootlin.com/downloads/releases/sources/ .

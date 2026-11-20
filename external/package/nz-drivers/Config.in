@@ -1,0 +1,11 @@
+config BR2_PACKAGE_NZ_DRIVERS
+	bool "nz-drivers (M5Stack Cardputer Zero kernel drivers + overlays)"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Out-of-tree kernel modules, device-tree overlays and firmware
+	  blobs for the M5Stack Cardputer Zero, built unmodified from
+	  https://github.com/m5stack/m5stack-linux-dtoverlays :
+	  ST7789V LCD (panel-mipi-dbi variant) + PWM backlight, TCA8418
+	  keyboard, ES8389 codec + sound card, BQ27220 fuel gauge, M5IOE1
+	  IO expander, power-fail handler, GPIO forwarder, BMI270 IMU and
+	  BMM150 magnetometer.

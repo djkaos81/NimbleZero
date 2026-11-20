@@ -1,0 +1,75 @@
+# Common to every Cardputer Zero configuration
+BR2_aarch64=y
+BR2_cortex_a53=y
+BR2_OPTIMIZE_2=y
+# Prebuilt Bootlin toolchain (gcc 14.3, glibc 2.41 = Debian trixie ABI level), pinned by hash in Buildroot
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_GLIBC_STABLE=y
+BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_NZ_PATH)/patches"
+BR2_TARGET_GENERIC_HOSTNAME="nimblezero"
+BR2_TARGET_GENERIC_ISSUE="NimbleZero"
+BR2_SYSTEM_DHCP=""
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/post-image.sh"
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,0b41724521c9adf5399409d02aece6c1df0a4432)/linux-0b41724521c9adf5399409d02aece6c1df0a4432.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/linux.fragment"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2710-rpi-cm0 broadcom/bcm2710-rpi-zero-2-w broadcom/bcm2710-rpi-3-b"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
+BR2_PACKAGE_RPI_FIRMWARE=y
+BR2_PACKAGE_RPI_FIRMWARE_BOOTCODE_BIN=y
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI=y
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/config.txt"
+BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/cmdline.txt"
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI=y
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI_BT=y
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI_WIFI=y
+BR2_PACKAGE_NZ_WIFI_NVRAM=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+BR2_PACKAGE_KMOD=y
+BR2_PACKAGE_KMOD_TOOLS=y
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
+BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
+BR2_PACKAGE_I2C_TOOLS=y
+BR2_PACKAGE_EVTEST=y
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="256M"
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y
+BR2_PACKAGE_NZ_DRIVERS=y
+BR2_PACKAGE_NZ_DIAG=y
+# root has no password (login as "zero", then sudo); the hash is forced to "*" in post-fakeroot.sh
+BR2_TARGET_GENERIC_ROOT_PASSWD=""
+BR2_ROOTFS_USERS_TABLES="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/users.table"
+BR2_ROOTFS_POST_FAKEROOT_SCRIPT="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/post-fakeroot.sh"
+# ^orphan_file: with that feature a forced read-only remount (POWER switch) while a deleted
+# file is still open leaves a filesystem the kernel refuses to mount read-only (BUG-LIST B1)
+BR2_TARGET_ROOTFS_EXT2_MKFS_OPTIONS="-O ^64bit,^orphan_file -E lazy_itable_init=0,lazy_journal_init=0"
+# --- first public release (NimbleZero) ---
+# sudo: the default user "zero" is not root; root has no password
+BR2_PACKAGE_SUDO=y
+# regulatory domain (Wi-Fi country setting)
+BR2_PACKAGE_IW=y
+# time zones for the Options menu; /etc/localtime points into the data partition
+BR2_TARGET_TZ_INFO=y
+BR2_TARGET_TZ_ZONELIST="default"
+BR2_TARGET_LOCALTIME="Etc/UTC"
+# BusyBox additions: ntpd (clock from the network)
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_NZ_PATH)/board/cardputerzero/busybox.fragment"

@@ -1,0 +1,5 @@
+#!/bin/sh
+# loginctl shim (Configuration A): there is no logind; lingering is implicit
+# because user units are started by /etc/init.d/S60nz-units at boot.
+case "$1" in enable-linger|disable-linger|terminate-user|kill-user) exit 0 ;; esac
+echo "loginctl (nz shim): '$*' ignored" >&2; exit 0

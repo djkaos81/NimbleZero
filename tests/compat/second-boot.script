@@ -1,0 +1,7 @@
+# Boot after release.script ended with NZ_HARD_OFF=1 (forced read-only with a deleted
+# file still open on the system partition - the state that made rc7 unbootable).
+# Run with NZ_SECOND_BOOT=1.
+R1 it booted; settings, password and files survived the switch-off :: cat /home/zero/marker; grep -c '^zero:\$6\$' /etc/shadow; cat /data/etc/nz/brightness; [ "$(cat /home/zero/marker)" = kept-across-boots ] && grep -q '^zero:\$6\$' /etc/shadow
+R2 the removed files are really gone and the system partition is clean and read-only :: ls /usr/lib/hold2 2>&1 | tail -n1; dmesg | grep -i 'ext4' | head -n 4; grep -q ' / ext4 ro' /proc/mounts && [ ! -e /usr/lib/hold2 ] && ! dmesg | grep -qi 'EXT4-fs error'
+R3 SSH is running again without a prompt (password was set) :: /etc/init.d/S50dropbear status && echo running
+R4 leftover "enabled" link of the removed M5 launcher does not blank the screen :: mkdir -p /home/zero/.config/systemd/user/default.target.wants; ln -sf /usr/lib/systemd/user/APPLaunch.service /home/zero/.config/systemd/user/default.target.wants/APPLaunch.service; killall nz-launcher; sleep 1; killall getty 2>/dev/null; sleep 6; pidof nz-launcher; r=$?; rm -f /home/zero/.config/systemd/user/default.target.wants/APPLaunch.service; [ $r = 0 ]

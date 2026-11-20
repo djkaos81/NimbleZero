@@ -1,0 +1,6 @@
+# Boot after the image was written again over a card that already held a data partition
+# (run-release-tests.sh copies the image over the start of the saved card).  NZ_SECOND_BOOT=1.
+F1 the existing data partition was adopted, not formatted :: cat /run/nz/data-format.log; nz-growpart --type /dev/mmcblk0 3; grep -q kept /run/nz/data-format.log && ! grep -q formatted /run/nz/data-format.log && [ "$(nz-growpart --type /dev/mmcblk0 3)" = 83 ]
+F2 files, password and settings from before the reflash are there :: cat /home/zero/marker; cat /data/etc/nz/brightness; [ "$(cat /home/zero/marker)" = kept-across-boots ] && grep -q '^zero:\$6\$' /etc/shadow && [ "$(cat /data/etc/nz/brightness)" = 30 ]
+F3 the system partition is the fresh one (packages installed before are gone) :: dpkg-query -W -f='${db:Status-Abbrev}${Package}\n' | grep -c '^ii m5cardputerzero'; [ "$(dpkg-query -W -f='${db:Status-Abbrev}${Package}\n' | grep -c '^ii m5cardputerzero')" = 0 ]
+F4 request a clean start: marker file on the boot partition (what Options > Erase all data writes) :: mount -o remount,rw /boot && : > /boot/nz-reset-data && sync && mount -o remount,ro /boot && ls /boot/nz-reset-data

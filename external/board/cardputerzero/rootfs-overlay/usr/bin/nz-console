@@ -1,0 +1,34 @@
+#!/bin/sh
+# Console supervisor used from /etc/inittab.
+#   tty1   : the LCD.  First boot: ask for a password for user "zero".  Then the
+#            launcher (NimbleZero's own, or M5Stack APPLaunch if the user chose it and it
+#            is installed), running as "zero".  Quitting the launcher gives a login prompt.
+#   ttyS0  : the UART header (mini-UART, enable_uart=1): login prompt.
+# A port that does not exist is re-checked once a minute.
+tty=$1
+N=/data/etc/nz
+case "$tty" in
+tty1)
+	if [ ! -e $N/firstboot-done ] && [ -x /usr/sbin/nz-firstboot ] && [ ! -e /run/nz/firstboot-shown ]; then
+		: > /run/nz/firstboot-shown
+		nz-firstboot </dev/tty1 >/dev/tty1 2>&1
+	fi
+	chown zero /dev/tty1 2>/dev/null
+	mkdir -p /run/user/1000 && chown zero /run/user/1000 && chmod 700 /run/user/1000
+	# M5Stack APPLaunch owns the LCD when it is the chosen launcher AND really installed
+	# (a leftover "enabled" link on the data partition must never leave the screen blank).
+	if [ "$(cat $N/launcher 2>/dev/null)" != native ] && [ -x /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch ] &&
+	   ls /home/*/.config/systemd/user/default.target.wants/APPLaunch.service >/dev/null 2>&1; then
+		echo 0 > /sys/class/vtconsole/vtcon1/bind 2>/dev/null     # keep fbcon off the panel
+		exec sleep 2147483647
+	fi
+	if [ -x /usr/bin/nz-launcher ] && [ ! -e /boot/nz-nolauncher ] && [ ! -e /run/nz/nolauncher ]; then
+		su -s /bin/sh zero -c 'export HOME=/home/zero USER=zero LOGNAME=zero XDG_RUNTIME_DIR=/run/user/1000; . /etc/profile 2>/dev/null; cd; exec nz-launcher' </dev/tty1 >/dev/tty1 2>&1
+	fi
+	exec /sbin/getty -L tty1 0 linux
+	;;
+*)
+	[ -c "/dev/$tty" ] || { sleep 60; exit 0; }
+	exec /sbin/getty -L "$tty" 115200 vt100
+	;;
+esac

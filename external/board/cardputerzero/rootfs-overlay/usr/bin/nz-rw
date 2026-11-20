@@ -1,0 +1,84 @@
+#!/bin/sh
+# nz-rw COMMAND [ARGS...] - run COMMAND with the system partition writable.
+#
+# The root filesystem is normally read-only (safe against sudden power loss).  Package
+# installation and deliberate system changes go through this wrapper: it remounts / read-
+# write, runs the command, syncs, and remounts read-only again.  Nested and concurrent
+# uses are counted, so / only goes back to read-only when the last one finishes.
+#   nz-rw passwd            change the root password
+#   nz-rw vi /etc/hostname  edit a system file
+[ $# -gt 0 ] || { sed -n '2,9p' "$0"; exit 2; }
+[ "$(id -u)" = 0 ] || exec "$@"
+[ -n "$NZ_RW" ] && exec "$@"                 # already inside a nz-rw session
+mkdir -p /run/nz; L=/run/nz/rw.lock; C=/run/nz/rw.count
+count() {  # +1 / -1 under a lock; prints the new value
+	( flock 9; n=$(( $(cat $C 2>/dev/null || echo 0) $1 )); [ $n -lt 0 ] && n=0; echo $n > $C; echo $n ) 9>$L
+}
+n=$(count +1)
+if [ "$n" = 1 ] || ! grep -q ' / ext4 rw' /proc/mounts; then
+	mount -o remount,rw / || { count -1 >/dev/null; echo "nz-rw: cannot make / writable" >&2; exit 1; }
+fi
+NZ_RW=1 "$@"; rc=$?
+sync
+# Programs that still run from files which were just replaced or removed keep those
+# files open, and the kernel cannot return the partition to read-only while they do.
+# Left like that, the POWER switch would force it read-only with deleted-but-open files
+# recorded (hardware report on rc7: the card did not start again).  So: restart or stop
+# such programs now.  Our own ancestors are spared (the caller may be the program that
+# asked for its own upgrade); for them the background retry below applies.
+holders() {   # pids with a deleted executable or library from the system partition
+	for p in /proc/[0-9]*; do
+		pid=${p#/proc/}
+		case "$(readlink $p/exe 2>/dev/null)" in *' (deleted)') echo $pid; continue ;; esac
+		grep -q ' /\(usr\|lib\|bin\|sbin\|opt\|etc\)/.* (deleted)$' $p/maps 2>/dev/null && echo $pid
+	done
+}
+is_ancestor() { q=$$; while [ "$q" -gt 1 ] 2>/dev/null; do [ "$q" = "$1" ] && return 0; q=$(awk '/^PPid:/{print $2}' /proc/$q/status 2>/dev/null); done; return 1; }
+unit_of() {   # print "scope unit" if the pid runs under an nz-unit supervisor
+	for m in /run/nz-units/*/*.main; do
+		[ -e "$m" ] || continue; q=$1
+		while [ "$q" -gt 1 ] 2>/dev/null; do
+			[ "$q" = "$(cat $m)" ] && { d=${m%/*}; u=${m##*/}; echo "${d##*/} ${u%.main}"; return 0; }
+			q=$(awk '/^PPid:/{print $2}' /proc/$q/status 2>/dev/null)
+		done
+	done; return 1
+}
+release_holders() {
+	for pid in $(holders); do
+		is_ancestor $pid && continue
+		name=$(cat /proc/$pid/comm 2>/dev/null)
+		if u=$(unit_of $pid); then
+			set -- $u
+			[ "$1" = user ] && ua="--user 1000" || ua=
+			if nz-unit $ua path "$2" >/dev/null 2>&1; then echo "nz-rw: restarting $2 (its files were replaced)" >&2; nz-unit $ua restart "$2" >/dev/null 2>&1
+			else echo "nz-rw: stopping $2 (it was removed)" >&2; nz-unit $ua stop "$2" >/dev/null 2>&1 || { s=$(cat /run/nz-units/$1/$2.sup 2>/dev/null); [ -n "$s" ] && kill $s 2>/dev/null; kill $pid 2>/dev/null; rm -f /run/nz-units/$1/$2.sup /run/nz-units/$1/$2.main; }; fi
+		else
+			echo "nz-rw: closing $name (pid $pid): its program file was replaced or removed" >&2
+			kill $pid 2>/dev/null
+		fi
+	done
+	n=0; while [ $n -lt 15 ]; do
+		left=; for pid in $(holders); do is_ancestor $pid || left="$left $pid"; done
+		[ -z "$left" ] && break
+		[ $n = 10 ] && kill -9 $left 2>/dev/null
+		sleep 0.2; n=$((n+1))
+	done
+}
+if [ "$(count -1)" = 0 ] && ! mount -o remount,ro / 2>/dev/null; then
+	release_holders
+	if ! mount -o remount,ro / 2>/dev/null; then
+		who=$(for pid in $(holders); do printf '%s(%s) ' "$(cat /proc/$pid/comm 2>/dev/null)" $pid; done)
+		echo "nz-rw: system partition is still in use${who:+ by $who}; it will be closed as soon as possible" >&2
+		echo "nz-rw: / still read-write after a package operation; holders: ${who:-unknown}" > /dev/kmsg
+		(
+			n=0
+			while [ $n -lt 360 ]; do
+				sleep 5; n=$((n+1))
+				[ "$(cat $C 2>/dev/null)" = 0 ] || exit 0          # another nz-rw session took over
+				mount -o remount,ro / 2>/dev/null && exit 0
+			done
+			echo "nz-rw: / still read-write after 30 minutes" > /dev/kmsg
+		) </dev/null >/dev/null 2>&1 &
+	fi
+fi
+exit $rc

@@ -1,0 +1,8 @@
+config BR2_PACKAGE_NZ_DIAG
+	bool "nz-diag (keyboard-driven diagnostic frontend)"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Small fbdev/evdev diagnostic UI and hardware probe for the
+	  Cardputer Zero: system status, expected-device checklist,
+	  keyboard test, display test/benchmark and kernel log viewer.
+	  Also provides "nz-diag --report" for headless use.

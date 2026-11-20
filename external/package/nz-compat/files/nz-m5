@@ -1,0 +1,24 @@
+#!/bin/sh
+# nz-m5 - fetch and install the upstream M5Stack packages on the device.
+# Nothing from M5Stack is shipped in the image; this downloads the official
+# release .deb files from GitHub (network required) and installs them with dpkg.
+#   nz-m5 install-launcher [VERSION]     APPLaunch (latest release if omitted)
+#   nz-m5 install REPO                   latest .deb of github.com/CardputerZero/REPO
+#   nz-m5 list                           installed M5Stack packages
+set -e
+G=https://github.com/CardputerZero; C=/data/cache/nz-m5; mkdir -p $C
+latest_deb() {  # repo -> URL of newest *_arm64.deb asset
+	tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$G/$1/releases/latest" | sed 's|.*/tag/||')
+	curl -fsSL "$G/$1/releases/expanded_assets/$tag" | grep -o "/CardputerZero/$1/releases/download/[^\"]*_arm64\.deb" | head -n1 | sed 's|^|https://github.com|'
+}
+case "$1" in
+install-launcher)
+	if [ -n "$2" ]; then url="$G/launcher/releases/download/launcher-v$2/applaunch_$2-m5stack1_arm64.deb"
+	else url="$G/launcher/releases/download/launcher-latest/applaunch_arm64.deb"; fi
+	curl -fL --retry 3 -o $C/applaunch.deb "$url"; apt-get install -y $C/applaunch.deb ;;
+install)
+	url=$(latest_deb "$2"); [ -n "$url" ] || { echo "no arm64 .deb found for $2" >&2; exit 1; }
+	curl -fL --retry 3 -o "$C/${url##*/}" "$url"; apt-get install -y "$C/${url##*/}" ;;
+list) dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Status}\n' | grep -vE -- '-nz1\b' ;;
+*) sed -n '2,8p' "$0"; exit 2 ;;
+esac

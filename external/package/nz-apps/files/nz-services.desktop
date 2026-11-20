@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Services
+Comment=SSH server, network time
+Exec=nz-services
+Terminal=true

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Minimal stand-in for xdg-user-dirs-update: create the standard directories.
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}"; mkdir -p "$cfg"
+: > "$cfg/user-dirs.dirs"
+for d in Desktop Documents Download:Downloads Music Pictures Videos; do
+	k=$(echo "${d%%:*}" | tr a-z A-Z); p=${d##*:}; mkdir -p "$HOME/$p"
+	echo "XDG_${k}_DIR=\"\$HOME/$p\"" >> "$cfg/user-dirs.dirs"
+done

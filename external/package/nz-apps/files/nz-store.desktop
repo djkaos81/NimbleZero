@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Store
+Comment=Browse and install Cardputer Zero apps
+Exec=nz-store
+Terminal=true

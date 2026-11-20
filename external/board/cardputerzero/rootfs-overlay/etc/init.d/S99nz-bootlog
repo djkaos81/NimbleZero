@@ -1,0 +1,43 @@
+#!/bin/sh
+# First-boot diagnostics: while the marker file "nz-debug" exists on the FAT boot
+# partition, every boot stores the kernel log, module list, process list and the
+# nz-diag hardware report in /boot/nz-logs/ (readable on any PC).  The last 5 are kept.
+# Delete nz-debug to stop writing to the card.
+case "$1" in
+start)
+	cut -d' ' -f1 /proc/uptime > /run/nz/t_init_done
+	[ -e /boot/nz-debug ] || exit 0
+	# Options menu switch (default: on for this release)
+	[ "$(cat /data/etc/nz/bootlog 2>/dev/null)" = off ] && exit 0
+	(
+		sleep 4      # let late drivers (Wi-Fi, audio) settle
+		mount -o remount,rw /boot 2>/dev/null || exit 0
+		mkdir -p /boot/nz-logs; cd /boot/nz-logs || exit 0
+		n=$(( $(cat seq 2>/dev/null || echo 0) + 1 )); echo $n > seq
+		{
+			echo "=== nz boot log #$n ==="; cat /etc/nz-release; cat /proc/cmdline
+			echo "init_start=$(cat /run/nz/t_init_start)s init_done=$(cat /run/nz/t_init_done)s"
+			echo "=== nz-diag --report ==="; nz-diag --report 2>&1
+			echo "=== display ==="; cat /run/nz/fb-activate 2>&1; ls -l /dev/fb_lcd /dev/dri/ 2>&1
+			for f in /sys/class/graphics/fb*/name /sys/class/drm/card*-*/status /sys/class/drm/card*-*/enabled /sys/class/drm/card*-*/dpms \
+			         /sys/class/backlight/*/brightness /sys/class/backlight/*/actual_brightness /sys/class/backlight/*/bl_power \
+			         /sys/class/vtconsole/vtcon*/name /sys/class/vtconsole/vtcon*/bind; do
+				[ -e "$f" ] && echo "$f: $(cat "$f" 2>&1)"
+			done
+			cat /run/nz/keymap 2>&1
+			echo "=== init script times (start end name) ==="; cat /run/nz/rcS-times 2>&1
+			echo "=== storage ==="; grep -E ' / | /boot | /data | /home | /root ' /proc/mounts; df -k / /data 2>&1
+			echo "p3 type: $(nz-growpart --type /dev/mmcblk0 3 2>&1)"; cat /run/nz/data-format.log 2>/dev/null; ls /run/nz/
+			echo "=== settings ==="; for f in /data/etc/nz/*; do [ -f "$f" ] && echo "${f##*/}: $(head -c 60 "$f")"; done; /etc/init.d/S50dropbear status && echo "ssh: running" || echo "ssh: not running"; date
+			echo "=== wifi ==="; ls /sys/class/net; ip addr 2>&1 | grep -E '^[0-9]|inet '; wpa_cli -i wlan0 status 2>&1 | grep -E 'wpa_state|ssid'
+			echo "=== lsmod ==="; lsmod
+			echo "=== ps ==="; ps
+			echo "=== free ==="; free
+			echo "=== i2c-1 ==="; i2cdetect -y 1 2>&1
+			echo "=== dmesg ==="; dmesg
+		} > "boot-$n.txt" 2>&1
+		rm -f "boot-$((n-5)).txt"
+		sync; mount -o remount,ro /boot
+	) &
+	;;
+esac

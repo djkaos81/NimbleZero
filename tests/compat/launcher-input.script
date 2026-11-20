@@ -1,0 +1,27 @@
+# Regression test for the "Wi-Fi setup skipped the network name" bug (hardware report,
+# rc2): keys pressed in the launcher also sat in the console's line buffer, so the next
+# text program read them as its first answer.  A test app reads one line with a timeout;
+# it must get nothing.  (On rc2 this test fails with "[jk]".)
+K1 install a console test app in the launcher :: echo 'read -t 4 x; echo "[$x]" > /tmp/stale' > /tmp/stale.sh; h=/home/zero; mkdir -p $h/.local/share/applications && chown -R zero $h/.local && printf '[Desktop Entry]\nType=Application\nName=AAA input test\nExec=sh /tmp/stale.sh\nTerminal=true\n' > $h/.local/share/applications/aaa.desktop && rm -f /tmp/stale; chmod 644 /tmp/stale.sh
+K1b fill the data partition completely :: mount | grep -q ' /data ' || exit 0; dd if=/dev/zero of=/data/fill bs=1M 2>/dev/null; df -k /data | tail -n1; [ $(df -k /data | awk 'END{print $4}') -lt 200 ]
+K1c the launcher restarts with a full data partition :: killall nz-launcher; sleep 1; killall getty 2>/dev/null; sleep 5; pidof nz-launcher
+@key k
+@key r
+@sleep 1
+@key j k
+@key ret
+@sleep 7
+K2 the app saw no left-over keystrokes :: cat /tmp/stale; [ "$(cat /tmp/stale)" = "[]" ]
+K3 launcher still running with a full data partition; clean up :: pidof nz-launcher && rm -f /data/fill
+# Graphical apps: what they print must go to /tmp/nz-app.log, not onto the screen
+# (hardware report, rc6: the IR-Remote app's log text was drawn over its own UI).
+K4 install a graphical test app that prints :: printf 'echo NOISE-ON-CONSOLE; echo NOISE-ERR >&2; sleep 8\n' > /tmp/noise.sh; printf '[Desktop Entry]\nType=Application\nName=AAA noise test\nExec=sh /tmp/noise.sh\nTerminal=false\n' > /home/zero/.local/share/applications/aaa.desktop; chmod 644 /tmp/noise.sh; pidof nz-launcher
+@key k
+@key r
+@key j k
+@key ret
+@sleep 3
+@shot graphical-app-running
+K5 its output went to the log file :: cat /tmp/nz-app.log; grep -q NOISE-ON-CONSOLE /tmp/nz-app.log && grep -q NOISE-ERR /tmp/nz-app.log
+@sleep 8
+K6 launcher is back afterwards :: pidof nz-launcher

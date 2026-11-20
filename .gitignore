@@ -1,0 +1,5 @@
+/out/
+/dl/
+*.img
+*.img.xz
+__pycache__/

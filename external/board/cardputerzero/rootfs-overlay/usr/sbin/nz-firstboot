@@ -1,0 +1,34 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# nz-firstboot - shown once on the LCD, before the launcher: choose a password for the
+# default user "zero".  The password is what SSH and sudo ask for.  Skipping is allowed;
+# SSH then stays off until a password is set (Options > Password).
+# Runs as root on tty1 from nz-console.
+N=/data/etc/nz
+mkdir -p $N
+clear 2>/dev/null
+cat <<'EOF'
+Welcome to NimbleZero
+
+Set a password for user "zero".
+It is used for SSH logins and for
+sudo. Without one, SSH stays off.
+
+Press Enter alone to skip.
+
+EOF
+if nz-admin set-password --first; then
+	[ "$(cat $N/ssh 2>/dev/null)" = off ] || { echo on > $N/ssh; /etc/init.d/S50dropbear restart >/dev/null 2>&1; }
+	echo
+	echo "SSH is on:  ssh zero@<address>"
+	echo "(Services menu switches it off.)"
+	sleep 4
+else
+	echo
+	echo "No password set. SSH is off."
+	echo "Set one later: Options > Password"
+	sleep 3
+fi
+[ -e /run/nz/data-volatile ] || : > $N/firstboot-done
+clear 2>/dev/null
+exit 0

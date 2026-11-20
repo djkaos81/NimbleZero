@@ -1,0 +1,8 @@
+# rc11: display settings at start.  The emulator has no LCD: this checks that the driver is
+# loaded with the image's settings and that the override used by S00nz-early works; it
+# says nothing about the picture.
+D1 LCD driver loaded at start with the smooth setting from /etc/modprobe.d :: cd /sys/module/panel_mipi_dbi_m/parameters && grep . * | xargs echo; [ "$(cat nz_path)$(cat nz_native)$(cat nz_te)$(cat nz_cached)$(cat nz_async)$(cat nz_fbdev_ms)" = 121118 ]
+D2 the override S00nz-early uses for nz-display-original / safe configuration gives the vendor behaviour :: rmmod panel_mipi_dbi_m && modprobe -q panel_mipi_dbi_m nz_path=0 nz_native=0 nz_te=0 nz_cached=0 nz_async=0 nz_fbdev_ms=0; cd /sys/module/panel_mipi_dbi_m/parameters && grep . * | xargs echo; [ "$(cat nz_path)$(cat nz_native)$(cat nz_te)$(cat nz_cached)$(cat nz_async)$(cat nz_fbdev_ms)" = 000000 ]
+D3 no complaints from the module loader :: ! dmesg | grep -i 'unknown symbol\|disagrees about\|unknown parameter'
+D4 nz-panel without an LCD says so; nz-paneltest draws into /dev/fb0 :: nz-panel status; nz-paneltest fbbars 2 | tail -n 1 | grep 'frames/s'
+D5 start script: marker file and safe configuration are both honoured :: grep -c 'nz-display-original\|nz.safe=1' /etc/init.d/S00nz-early; sh -n /etc/init.d/S00nz-early && sh -n /usr/sbin/nz-panel

@@ -1,0 +1,115 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# nz-store - browse and install Cardputer Zero apps from the launcher.
+# Sources and safety rules: see nz-store-backend.  This menu runs as the normal user;
+# installing and removing go through "sudo nz-admin store ...".
+C=/data/cache/nz-store
+OFFICIAL=/usr/share/nz/store-official.list
+A="sudo -n /usr/sbin/nz-admin"; [ "$(id -u)" = 0 ] && A=/usr/sbin/nz-admin
+T=$(mktemp -d /tmp/nz-store.XXXXXX) || exit 1
+trap 'rm -rf "$T"' EXIT
+TAB=$(printf '\t'); US=$(printf '\037')      # catalogue fields are separated by US
+pause() { printf '\nPress Enter '; IFS= read -r _; }
+
+have_names() {   # every package name this system has or provides, one per line
+	dpkg-query -W -f='${db:Status-Status} ${Package}\n${db:Status-Status} ${Provides}\n' 2>/dev/null |
+		sed -n 's/^installed //p' | tr ',' '\n' | sed 's/^ *//; s/[ (].*//' | grep . | sort -u > "$T/have"
+}
+missing() {      # $1 = Depends field; prints the dependencies nothing here satisfies
+	printf '%s\n' "$1" | tr ',' '\n' | while IFS= read -r alt; do
+		[ -n "$alt" ] || continue; ok=1
+		for d in $(printf '%s' "$alt" | tr '|' '\n' | sed 's/^ *//; s/[ (:].*//'); do grep -qx "$d" "$T/have" && ok=0; done
+		[ $ok = 0 ] || printf '%s ' "$(printf '%s' "$alt" | sed 's/^ *//; s/[ (:|].*//')"
+	done
+}
+installed_ver() { dpkg-query -W -f='${db:Status-Status} ${Version}' "$1" 2>/dev/null | sed -n 's/^installed //p'; }
+
+build_list() {   # $T/rows (for nz-pick) and $T/keys (same order: kind<TAB>name)
+	have_names; : > "$T/rows"; : > "$T/keys"; : > "$T/inst"; : > "$T/ok"; : > "$T/no"
+	while IFS='|' read -r pkg repo title desc; do
+		[ -n "$pkg" ] || continue
+		v=$(installed_ver "$pkg")
+		if [ -n "$v" ]; then echo "official$TAB$pkg$TAB$title$TAB$v$TAB$desc" >> "$T/inst"
+		else echo "official$TAB$pkg$TAB$title${TAB}M5Stack$TAB$desc" >> "$T/ok"; fi
+	done < $OFFICIAL
+	if [ -s $C/catalogue.tsv ]; then
+		while IFS="$US" read -r pkg ver size sha url dep desc; do
+			grep -q "^$pkg|" $OFFICIAL && continue
+			v=$(installed_ver "$pkg")
+			if [ -n "$v" ]; then
+				[ "$v" = "$ver" ] && s=$v || s="update"
+				echo "index$TAB$pkg$TAB$pkg$TAB$s$TAB$desc" >> "$T/inst"
+			else
+				m=$(missing "$dep")
+				if [ -z "$m" ]; then echo "index$TAB$pkg$TAB$pkg$TAB$ver$TAB$desc" >> "$T/ok"
+				else echo "index$TAB$pkg$TAB$pkg${TAB}needs more${TAB}needs: $m" >> "$T/no"; fi
+			fi
+		done < $C/catalogue.tsv
+	fi
+	emit() { [ -s "$2" ] || return; echo "-$1" >> "$T/rows"; echo "head" >> "$T/keys"
+		while IFS="$TAB" read -r kind pkg title state desc; do
+			echo "$title$TAB$state$TAB$desc" >> "$T/rows"; echo "$kind$TAB$pkg" >> "$T/keys"
+		done < "$2"; }
+	echo "Refresh the app list$TAB$TAB$(age)" >> "$T/rows"; echo "refresh" >> "$T/keys"
+	emit "Installed" "$T/inst"
+	emit "Can be installed ($(wc -l < "$T/ok"))" "$T/ok"
+	emit "Need software this OS lacks ($(wc -l < "$T/no"))" "$T/no"
+}
+age() {
+	[ -s $C/refreshed ] || { echo "community apps: not downloaded yet"; return; }
+	echo "index from $(date -d "@$(cat $C/refreshed)" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+}
+
+details() {      # $1 kind, $2 package
+	kind=$1; pkg=$2
+	while :; do
+		v=$(installed_ver "$pkg")
+		clear 2>/dev/null
+		if [ "$kind" = official ]; then
+			IFS='|' read -r _ repo title desc <<E2
+$(grep "^$pkg|" $OFFICIAL)
+E2
+			echo "$title"; echo "$desc"; echo "Source: github.com/CardputerZero/$repo"
+			dep=; ver="latest release"
+		else
+			IFS="$US" read -r _ ver size sha url dep desc <<E2
+$(awk -F'\037' -v n="$pkg" '$1==n' $C/catalogue.tsv)
+E2
+			echo "$pkg $ver"; echo "$desc" | fold -s -w 52
+			echo "Download: $(( (size + 1023) / 1024 )) KB"
+			[ -n "$dep" ] && echo "Needs: $dep" | fold -s -w 52
+			m=$(missing "$dep"); [ -n "$m" ] && { echo; echo "Cannot be installed: this OS lacks"; echo "  $m" | fold -s -w 52; }
+		fi
+		[ -n "$v" ] && echo "Installed: $v"
+		echo "System space free: $(df -h / | awk 'END{print $4}')"
+		pause
+		: > "$T/act"
+		if [ -n "$v" ]; then
+			[ "$kind" = official ] && echo "Update to the latest release" >> "$T/act" || { [ "$v" != "$ver" ] && echo "Update to $ver" >> "$T/act"; }
+			echo "Remove" >> "$T/act"
+		else echo "Install" >> "$T/act"; fi
+		echo "Back" >> "$T/act"
+		n=$(nz-pick "$pkg" < "$T/act") || return
+		case "$(sed -n "${n}p" "$T/act")" in
+		Install|Update*) clear 2>/dev/null; $A store install "$pkg"; pause; return 10 ;;
+		Remove) clear 2>/dev/null; $A store remove "$pkg"; pause; return 10 ;;
+		*) return ;;
+		esac
+	done
+}
+
+if [ "${1:-}" = --list ]; then build_list; paste "$T/keys" "$T/rows"; exit 0; fi   # headless (tests)
+pos=1
+while :; do
+	clear 2>/dev/null; echo "Store: reading the app list..."
+	build_list
+	n=$(nz-pick -s "$pos" "Store" "Enter:open  F/X:move  Z/C:page  Esc:back" < "$T/rows") || exit 0
+	pos=$n
+	IFS="$TAB" read -r kind pkg <<E2
+$(sed -n "${n}p" "$T/keys")
+E2
+	case "$kind" in
+	refresh) clear 2>/dev/null; $A store refresh || true; pause ;;
+	official|index) details "$kind" "$pkg"; [ $? = 10 ] && pos=1 ;;      # the list changed: back to the top
+	esac
+done

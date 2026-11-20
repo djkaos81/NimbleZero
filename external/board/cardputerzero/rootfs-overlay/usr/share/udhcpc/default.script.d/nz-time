@@ -1,0 +1,9 @@
+#!/bin/sh
+# Clock from the network: once per boot, after the first DHCP lease, ask an NTP server
+# and store the result in the hardware clock.  Switch: Services menu (/data/etc/nz/ntp).
+case "$1" in bound|renew) ;; *) exit 0 ;; esac
+[ "$(cat /data/etc/nz/ntp 2>/dev/null)" = off ] && exit 0
+[ -e /run/nz/ntp-started ] && exit 0
+: > /run/nz/ntp-started
+( nz-admin ntp sync >/dev/null 2>&1 || rm -f /run/nz/ntp-started ) </dev/null >/dev/null 2>&1 &
+exit 0

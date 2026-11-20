@@ -1,0 +1,13 @@
+[Unit]
+Description=Cardputer Zero early bring-up (boot partition, display path)
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/init.d/S00nz-early start
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=SSH client
+Comment=Connect to another machine
+Exec=nz-ssh
+Terminal=true

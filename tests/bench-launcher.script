@@ -1,0 +1,4 @@
+# Native launcher running on the LCD (screen on), then with a terminal app started from it.
+B0 settle :: rm -f /run/nz/nolauncher; killall nz-diag 2>/dev/null; sleep 30; pidof nz-launcher
+BENCH native-launcher :: nz-perf -i 30
+@shot bench-launcher

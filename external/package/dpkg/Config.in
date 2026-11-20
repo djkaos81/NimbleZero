@@ -1,0 +1,17 @@
+config BR2_PACKAGE_DPKG
+	bool "dpkg (Debian package manager, C tools only)"
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_LIBMD
+	select BR2_PACKAGE_ZLIB
+	select BR2_PACKAGE_XZ
+	select BR2_PACKAGE_BZIP2
+	select BR2_PACKAGE_ZSTD
+	select BR2_PACKAGE_TAR
+	help
+	  The real dpkg from Debian (same upstream version as Debian
+	  trixie): dpkg, dpkg-deb, dpkg-query, dpkg-divert,
+	  dpkg-statoverride, dpkg-trigger, dpkg-split and
+	  update-alternatives.  The Perl development scripts
+	  (dpkg-dev) are not installed.
+
+	  https://wiki.debian.org/Teams/Dpkg

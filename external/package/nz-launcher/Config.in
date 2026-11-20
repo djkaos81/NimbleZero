@@ -1,0 +1,7 @@
+config BR2_PACKAGE_NZ_LAUNCHER
+	bool "nz-launcher (native keyboard-first launcher + nzui header)"
+	help
+	  Small fbdev/evdev application launcher that lists freedesktop
+	  .desktop entries (native apps and M5Stack app packages alike)
+	  and manages one foreground application at a time.  Also
+	  installs the nzui.h single-header UI layer into the SDK.

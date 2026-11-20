@@ -1,0 +1,152 @@
+#!/bin/sh
+# nz-wifi - Wi-Fi setup from the keyboard (wpa_supplicant + udhcpc).
+#
+# Rules this follows:
+#   - a network is saved only after the access point accepted it; a failed attempt
+#     changes nothing and the previously saved network is restored;
+#   - the menu always comes first, so a saved network can be replaced or forgotten
+#     at any time.
+# Saved configuration: /data/etc/wpa_supplicant.conf (the system partition is read-only).
+IF=${NZ_WIFI_IF:-wlan0}
+CONF=${NZ_WIFI_CONF:-/data/etc/wpa_supplicant.conf}
+RUN=${NZ_WIFI_RUN:-/run/nz}
+TRY=$RUN/wifi-try.conf; SCAN=$RUN/wifi-scan.conf; LIST=$RUN/wifi.list
+WPID=/run/wpa_supplicant.pid; DPID=/run/udhcpc.$IF.pid
+TAB=$(printf '\t')
+mkdir -p "$RUN" "$(dirname "$CONF")"
+
+w() { wpa_cli -i "$IF" "$@" 2>/dev/null; }
+ask() { printf '%s' "$1"; IFS= read -r REPLY || REPLY=; }
+pause() { ask "Press Enter "; }
+state() { w status | sed -n 's/^wpa_state=//p'; }
+cur_ssid() { w status | sed -n 's/^ssid=//p'; }
+cur_ip() { ip -4 addr show "$IF" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n1; }
+saved_ssid() { [ -f "$CONF" ] && sed -n 's/^[[:space:]]*ssid="\(.*\)"[[:space:]]*$/\1/p' "$CONF" | head -n1; }
+
+stop_dhcp() { [ -f "$DPID" ] && kill "$(cat "$DPID")" 2>/dev/null; rm -f "$DPID"; }
+stop_wpa() {
+	stop_dhcp
+	[ -f "$WPID" ] && kill "$(cat "$WPID")" 2>/dev/null
+	killall wpa_supplicant 2>/dev/null
+	i=0; while pidof wpa_supplicant >/dev/null 2>&1 && [ $i -lt 20 ]; do sleep 0.2; i=$((i+1)); done
+	rm -f "$WPID"
+}
+start_wpa() {  # $1 = configuration file
+	stop_wpa
+	ip link set "$IF" up 2>/dev/null
+	wpa_supplicant -B -i "$IF" -c "$1" -P "$WPID" >/dev/null 2>&1
+	i=0; while ! w status >/dev/null && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
+	w status >/dev/null
+}
+start_dhcp() { stop_dhcp; udhcpc -b -i "$IF" -x hostname:"$(hostname)" -p "$DPID" >/dev/null 2>&1; }
+restore_saved() {  # go back to the saved network, or to no connection at all
+	if [ -n "$(saved_ssid)" ]; then start_wpa "$CONF" && start_dhcp; else stop_wpa; fi
+}
+
+header() {
+	clear 2>/dev/null
+	echo "Wi-Fi setup"
+	echo "-----------"
+	s=$(saved_ssid); c=$(cur_ssid); a=$(cur_ip)
+	echo "Saved network : ${s:-(none)}"
+	if [ "$(state)" = COMPLETED ] && [ -n "$c" ]; then echo "Status        : connected to $c${a:+, $a}"
+	else echo "Status        : not connected"; fi
+	echo
+}
+
+choose() {
+	# a supplicant must be running to scan; if none is, start one that knows no network
+	if ! w status >/dev/null; then
+		printf 'ctrl_interface=/var/run/wpa_supplicant\n' > "$SCAN"
+		start_wpa "$SCAN" || { echo "Could not start wpa_supplicant."; pause; return; }
+	fi
+	echo "Scanning..."
+	w scan >/dev/null; sleep 4
+	w scan_results | awk -F'\t' 'NR>1 && $5!="" {print $3 "\t" $5}' | sort -rn | awk -F'\t' '!s[$2]++' | head -n 9 > "$LIST"
+	n=0
+	while IFS="$TAB" read -r sig ssid; do n=$((n+1)); printf ' %d) %-30s %s dBm\n' $n "$ssid" "$sig"; done < "$LIST"
+	[ $n -gt 0 ] || echo " (no networks found)"
+	echo
+	ask "Number, or type a network name (Enter = back): "
+	[ -n "$REPLY" ] || return
+	case "$REPLY" in
+	*[!0-9]*) ssid=$REPLY ;;
+	*) ssid=$(sed -n "${REPLY}p" "$LIST" | cut -f2-); [ -n "$ssid" ] || { echo "No entry $REPLY."; pause; return; } ;;
+	esac
+	while :; do
+		echo "Network: $ssid"
+		ask "Passphrase (Enter = open network): "; psk=$REPLY
+		[ -z "$psk" ] && break
+		[ ${#psk} -ge 8 ] && [ ${#psk} -le 63 ] && break
+		echo "A WPA passphrase has 8 to 63 characters (this one has ${#psk})."
+	done
+	{
+		echo "ctrl_interface=/var/run/wpa_supplicant"
+		if [ -n "$psk" ]; then wpa_passphrase "$ssid" "$psk" | grep -v '#psk'
+		else printf 'network={\n\tssid="%s"\n\tkey_mgmt=NONE\n}\n' "$ssid"; fi
+	} > "$TRY"; chmod 600 "$TRY"
+	grep -q 'ssid=' "$TRY" || { echo "Could not build a configuration for that name."; rm -f "$TRY"; pause; return; }
+
+	echo; printf 'Connecting to %s ' "$ssid"
+	start_wpa "$TRY"
+	i=0; seen_auth=0; ok=0
+	while [ $i -lt 30 ]; do
+		st=$(state)
+		case "$st" in
+		COMPLETED) ok=1; break ;;
+		ASSOCIATING|ASSOCIATED|4WAY_HANDSHAKE|GROUP_HANDSHAKE) seen_auth=1 ;;
+		esac
+		# wpa_supplicant marks the network TEMP-DISABLED after a rejected key
+		w list_networks | grep -q 'TEMP-DISABLED' && { seen_auth=2; break; }
+		printf '.'; sleep 1; i=$((i+1))
+	done
+	echo
+	if [ $ok = 1 ]; then
+		# accepted by the access point: only now does it become the saved network
+		cp "$TRY" "$CONF.new" && chmod 600 "$CONF.new" && mv "$CONF.new" "$CONF" && sync
+		rm -f "$TRY"
+		echo "Connected. Network saved."
+		start_dhcp
+		i=0; while [ -z "$(cur_ip)" ] && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
+		a=$(cur_ip)
+		if [ -n "$a" ]; then echo "Address: $a"; else echo "No address from the network yet (DHCP still trying)."; fi
+	else
+		case $seen_auth in
+		2) echo "The network rejected the passphrase." ;;
+		1) echo "Found the network but could not finish connecting"; echo "(wrong passphrase, or the signal is too weak)." ;;
+		*) echo "Network '$ssid' was not found." ;;
+		esac
+		echo "Nothing was saved."
+		rm -f "$TRY"
+		s=$(saved_ssid); [ -n "$s" ] && echo "Going back to the saved network '$s'."
+		restore_saved
+	fi
+	pause
+}
+
+forget() {
+	s=$(saved_ssid)
+	ask "Forget '$s'? (y/N): "
+	case "$REPLY" in y|Y|yes) ;; *) return ;; esac
+	stop_wpa; rm -f "$CONF"; sync
+	ip addr flush dev "$IF" 2>/dev/null
+	echo "Forgotten."
+	[ -f /boot/wifi.conf ] && echo "Note: wifi.conf on the boot partition will be" && echo "applied again at the next start."
+	pause
+}
+
+[ -e "/sys/class/net/$IF" ] || [ -n "$NZ_WIFI_TEST" ] || { echo "No $IF interface (driver or firmware not loaded)."; pause; exit 1; }
+while :; do
+	header
+	s=$(saved_ssid)
+	echo " 1) Choose a network"
+	[ -n "$s" ] && echo " 2) Forget '$s'" && echo " 3) Reconnect to '$s'"
+	echo
+	ask "Choice (Enter = exit): "
+	case "$REPLY" in
+	1) choose ;;
+	2) [ -n "$s" ] && forget ;;
+	3) [ -n "$s" ] && { echo "Reconnecting..."; restore_saved; sleep 5; } ;;
+	"") exit 0 ;;
+	esac
+done

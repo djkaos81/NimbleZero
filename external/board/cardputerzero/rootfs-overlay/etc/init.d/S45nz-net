@@ -1,0 +1,24 @@
+#!/bin/sh
+# Headless networking: Wi-Fi from /boot/wifi.conf or the Wi-Fi app, DHCP on USB Ethernet.
+# Everything runs in the background so it never delays the console.
+start() {
+	(
+		nz-admin apply-volume 2>/dev/null       # saved speaker volume (Options menu)
+		[ -e /sys/class/net/eth0 ] && udhcpc -b -q -i eth0 -x hostname:"$(hostname)" >/dev/null 2>&1
+		CONF=/data/etc/wpa_supplicant.conf
+		# /boot/wifi.conf (edited on a PC) wins over what the Wi-Fi app saved
+		[ -f /boot/wifi.conf ] && { tr -d '\r' < /boot/wifi.conf > $CONF; chmod 600 $CONF; }
+		grep -q 'ssid=' $CONF 2>/dev/null || exit 0
+		n=0; while [ ! -e /sys/class/net/wlan0 ] && [ $n -lt 20 ]; do sleep 0.5; n=$((n+1)); done
+		[ -e /sys/class/net/wlan0 ] || { echo "nz-net: wlan0 did not appear" > /dev/kmsg; exit 1; }
+		# regulatory domain chosen in the Options menu (channels and power for that country)
+		c=$(cat /data/etc/nz/wifi-country 2>/dev/null); [ -n "$c" ] && iw reg set "$c" 2>/dev/null
+		wpa_supplicant -B -i wlan0 -c $CONF -P /run/wpa_supplicant.pid >/dev/null 2>&1
+		udhcpc -b -i wlan0 -x hostname:"$(hostname)" -p /run/udhcpc.wlan0.pid >/dev/null 2>&1
+	) &
+}
+stop() {
+	[ -f /run/udhcpc.wlan0.pid ] && kill "$(cat /run/udhcpc.wlan0.pid)" 2>/dev/null
+	[ -f /run/wpa_supplicant.pid ] && kill "$(cat /run/wpa_supplicant.pid)" 2>/dev/null
+}
+case "$1" in start) start ;; stop) stop ;; restart) stop; sleep 1; start ;; esac

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Start all init scripts in /etc/init.d in order (Buildroot's rcS), additionally
+# recording how long each one took in /run/nz/rcS-times ("<seconds> <script>").
+mkdir -p /run/nz
+for i in /etc/init.d/S??* ;do
+	[ ! -f "$i" ] && continue
+	read -r t0 _ < /proc/uptime
+	case "$i" in
+	*.sh)
+		( trap - INT QUIT TSTP; set start; . $i ) ;;
+	*)
+		$i start ;;
+	esac
+	read -r t1 _ < /proc/uptime
+	echo "$t0 $t1 ${i##*/}" >> /run/nz/rcS-times
+done

@@ -1,0 +1,108 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# nz-store-backend - the root half of the Store (called through nz-admin; the menu
+# itself, nz-store, runs as the unprivileged user).
+#
+# Two sources, both M5Stack's own:
+#   1. the Cardputer Zero app index (the catalogue the M5 Store uses):
+#      https://cardputerzero.github.io/packages  - an APT "Packages" file whose entries
+#      carry an absolute download URL and a SHA-256;
+#   2. M5Stack's official apps, published as releases of github.com/CardputerZero/<repo>
+#      (list: /usr/share/nz/store-official.list); installed like "nz-m5 install <repo>".
+# Nothing is installed from anywhere else: a download URL must start with one of the
+# prefixes below, and index downloads are checked against the SHA-256 from the index.
+#
+#   nz-store-backend refresh          download the index, rebuild the catalogue
+#   nz-store-backend install NAME     NAME = package name from the catalogue
+#   nz-store-backend remove NAME
+set -u
+C=/data/cache/nz-store
+INDEX_URL=https://cardputerzero.github.io/packages/dists/stable/main/binary-arm64/Packages
+[ -s /run/nz/store-test ] && INDEX_URL=$(sed -n 2p /run/nz/store-test)      # test fixture, see below
+OFFICIAL=/usr/share/nz/store-official.list
+ALLOW1=https://github.com/CardputerZero/
+ALLOW2=https://cardputerzero.github.io/
+mkdir -p $C && chmod 755 $C
+US=$(printf '\037')
+fail() { echo "Store: $*" >&2; exit 1; }
+
+build_catalogue() {
+	# one line per package, newest version only:
+	# name, version, size, sha256, url, depends, description - separated by the ASCII unit
+	# separator (octal 037): a tab would not do, the shell's read drops empty tab fields
+	awk 'BEGIN { RS=""; FS="\n"; OFS="\037" }
+	{
+		p=v=s=h=u=d=t=""
+		for (i = 1; i <= NF; i++) {
+			if ($i ~ /^Package: /) p = substr($i, 10)
+			else if ($i ~ /^Version: /) v = substr($i, 10)
+			else if ($i ~ /^Size: /) s = substr($i, 7)
+			else if ($i ~ /^SHA256: /) h = substr($i, 9)
+			else if ($i ~ /^Filename: /) u = substr($i, 11)
+			else if ($i ~ /^Depends: /) d = substr($i, 10)
+			else if ($i ~ /^Description: /) t = substr($i, 14)
+		}
+		gsub(/\037/, " ", t); gsub(/\037/, " ", d)
+		if (p != "" && v != "" && u != "" && h != "") print p, v, s, h, u, d, t
+	}' "$1" | sort -t "$US" -k1,1 > $C/all.tsv
+	: > $C/catalogue.new; prev=; best=
+	while IFS="$US" read -r p v rest; do
+		if [ "$p" != "$prev" ]; then
+			[ -n "$best" ] && printf '%s\n' "$best" >> $C/catalogue.new
+			prev=$p; best="$p$US$v$US$rest"; bv=$v
+		elif dpkg --compare-versions "$v" gt "$bv" 2>/dev/null; then best="$p$US$v$US$rest"; bv=$v
+		fi
+	done < $C/all.tsv
+	[ -n "$best" ] && printf '%s\n' "$best" >> $C/catalogue.new
+	rm -f $C/all.tsv
+	[ -s $C/catalogue.new ] || return 1
+	chmod 644 $C/catalogue.new && mv $C/catalogue.new $C/catalogue.tsv
+}
+
+case "${1:-}" in
+refresh)
+	echo "Downloading the app index..."
+	curl -fsSL --connect-timeout 15 --max-time 120 -o $C/Packages.new "$INDEX_URL" || fail "the app index could not be downloaded (is Wi-Fi connected?)"
+	grep -q '^Package: ' $C/Packages.new || fail "the downloaded index is not a package list"
+	mv $C/Packages.new $C/Packages
+	build_catalogue $C/Packages || fail "the index contains no usable entries"
+	date +%s > $C/refreshed
+	echo "$(wc -l < $C/catalogue.tsv) apps in the index."
+	;;
+install)
+	name=${2:-}; case "$name" in ''|*[!a-z0-9+.-]*) fail "bad package name" ;; esac
+	# official M5Stack app or the M5 launcher: latest GitHub release of its repository
+	repo=$(awk -F'|' -v n="$name" '$1==n{print $2}' $OFFICIAL 2>/dev/null)
+	if [ "$name" = applaunch ]; then exec nz-m5 install-launcher; fi
+	if [ -n "$repo" ]; then exec nz-m5 install "$repo"; fi
+	[ -s $C/catalogue.tsv ] || fail "no app index yet - refresh first"
+	line=$(awk -F'\037' -v n="$name" '$1==n' $C/catalogue.tsv); [ -n "$line" ] || fail "$name is not in the index"
+	ver=$(printf '%s' "$line" | cut -d"$US" -f2); sha=$(printf '%s' "$line" | cut -d"$US" -f4); url=$(printf '%s' "$line" | cut -d"$US" -f5)
+	# test fixture (emulator, no network): root may redirect downloads to a mounted disk by
+	# writing its mount path into /run/nz/store-test, a directory only root can write
+	if [ -s /run/nz/store-test ]; then url="$(sed -n 1p /run/nz/store-test)${url##*/}"
+		case "$url" in file:///mnt/*) ;; *) fail "refusing $url" ;; esac
+	else
+		case "$url" in "$ALLOW1"*|"$ALLOW2"*) ;; *) fail "refusing a download from outside M5Stack's repositories: $url" ;; esac
+	fi
+	f=$C/${name}_${ver}_arm64.deb
+	echo "Downloading $name $ver..."
+	curl -fL --retry 3 --connect-timeout 15 -o "$f.part" "$url" || { rm -f "$f.part"; fail "download failed"; }
+	[ "$(sha256sum "$f.part" | cut -d' ' -f1)" = "$sha" ] || { rm -f "$f.part"; fail "the download does not match the index checksum; not installed"; }
+	mv "$f.part" "$f"
+	[ "$(dpkg-deb -f "$f" Package 2>/dev/null)" = "$name" ] || { rm -f "$f"; fail "the file is not the package $name"; }
+	echo "Installing..."
+	apt-get install -y "$f"; rc=$?
+	rm -f "$f"
+	[ $rc = 0 ] || fail "$name was not installed"
+	echo "$name $ver installed."
+	;;
+remove)
+	name=${2:-}; case "$name" in ''|*[!a-z0-9+.-]*) fail "bad package name" ;; esac
+	st=$(dpkg-query -W -f='${db:Status-Abbrev}' "$name" 2>/dev/null) || fail "$name is not installed"
+	case "$st" in h*) fail "$name is part of the system and cannot be removed" ;; esac
+	apt-get remove -y "$name" || fail "$name was not removed"
+	echo "$name removed."
+	;;
+*) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

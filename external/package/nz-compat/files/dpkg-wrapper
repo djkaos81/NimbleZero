@@ -1,0 +1,37 @@
+#!/bin/sh
+# /usr/bin/dpkg on NimbleZero: a guard in front of the real dpkg
+# (/usr/libexec/nz/dpkg).
+#
+# The system image is not made of Debian packages, so dpkg alone cannot know
+# that a package is about to take over a system file.  Before an install/unpack
+# this guard lists the files of every .deb named on the command line and refuses
+# the whole operation if one of them is a firmware file (inventory:
+# /var/lib/dpkg/info/nz-firmware.list).  Without this, "--force-overwrite" would
+# hand ownership of e.g. /lib/libc.so.6 to the package, and removing that package
+# later would delete it.  Everything else is passed through unchanged.
+REAL=/usr/libexec/nz/dpkg
+INV=/var/lib/dpkg/info/nz-firmware.list
+check=0
+for a; do case "$a" in -i|--install|--unpack|-iR|-Ri|-R|--recursive) check=1 ;; esac; done
+if [ $check = 1 ] && [ -r "$INV" ]; then
+	bad=0
+	for a; do
+		[ -f "$a" ] || { [ -d "$a" ] && set -- "$@" "$a"/*.deb; continue; }
+		case "$a" in *.deb) ;; *) continue ;; esac
+		hits=$(dpkg-deb --fsys-tarfile "$a" 2>/dev/null | tar -t 2>/dev/null | grep -v '/$' | sed 's|^\./|/|; s|^[^/]|/&|' | grep -Fxf - "$INV" | head -n 5)
+		# shared directories are fine; only regular files / links of the firmware count
+		for h in $hits; do
+			[ -d "$h" ] && [ ! -L "$h" ] && continue
+			[ $bad = 0 ] && echo "dpkg (nz guard): refusing $(basename "$a"): it contains files that belong to the system image:" >&2
+			echo "  $h" >&2; bad=1
+		done
+	done
+	[ $bad = 0 ] || { echo "dpkg (nz guard): nothing was installed. System files can only change with a new OS image." >&2; exit 1; }
+fi
+# The system partition is read-only; anything that is not a pure query runs inside nz-rw.
+ro=0
+for a; do case "$a" in -l|--list|-s|--status|-L|--listfiles|-S|--search|-p|--print-avail|--version|--help|-\?|\
+	--print-architecture|--print-foreign-architectures|--compare-versions|--get-selections|-C|--audit|\
+	-c|--contents|-I|--info|-f|--field|--verify|-V|--assert-*|--validate-*|--predep-package) ro=1 ;; esac; done
+[ $ro = 1 ] && exec "$REAL" "$@"
+exec nz-rw "$REAL" "$@"

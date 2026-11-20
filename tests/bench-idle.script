@@ -1,0 +1,5 @@
+# Idle measurements, identical for every variant: no UI on the LCD, login prompt only.
+B0 settle :: : > /run/nz/nolauncher; killall nz-diag nz-launcher 2>/dev/null; sleep 40; true
+BENCH idle :: nz-perf -i 30
+B1 process list :: ps -o pid,rss,args 2>/dev/null | grep -v ' \[' | sort -k2 -n -r | head -n 25 || ps
+B2 first-boot writes and boot script timing :: cat /run/nz/rcS-times 2>/dev/null | awk '{printf "%-18s %.2f\n", $3, $2-$1}'; systemd-analyze 2>/dev/null | head -n 2; systemd-analyze blame 2>/dev/null | head -n 8; true

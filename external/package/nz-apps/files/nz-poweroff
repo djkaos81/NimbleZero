@@ -1,0 +1,14 @@
+#!/bin/sh
+# nz-poweroff - stop the system and tell the user what to do next.
+#
+# The Compute Module cannot cut its own power: after the kernel halts, the board stays
+# powered until the POWER switch is moved.  The kernel also switches the LCD off as it
+# halts, so nothing can be left on the screen afterwards (seen on hardware, rc5); the
+# instruction is therefore shown for a few seconds BEFORE stopping, and this script
+# then keeps the console so the launcher does not redraw over it.
+clear 2>/dev/null
+printf '\n\n\n   Shutting down.\n\n   When the screen goes dark,\n   slide the POWER switch off.\n'
+[ -n "$NZ_POWEROFF_TEST" ] && exit 0
+sleep 3
+poweroff
+sleep 60

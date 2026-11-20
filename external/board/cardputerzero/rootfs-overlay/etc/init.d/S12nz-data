@@ -1,0 +1,118 @@
+#!/bin/sh
+# Persistent data.
+#
+# Runs after udev (S10) and the display activation (S11) on purpose: the LCD only comes
+# up once udev has loaded its last driver, and the first-start message below has to be
+# visible (the first start takes several seconds; measured 6.5 s on a 16 GB card).
+#
+# The root filesystem is mounted read-only, so the power switch (or a flat battery) can
+# cut power at any moment without damaging the system.  Everything that has to survive a
+# reboot lives on the third partition, mounted at /data:
+#   /data/home, /data/root   bind-mounted over /home and /root
+#   /data/var/lib            bind-mounted over /var/lib (application state)
+#   /data/etc                Wi-Fi configuration, SSH host keys, passwords, settings (nz/)
+#   /data/cache              downloaded packages
+# The image ships that partition unformatted; the first boot creates it to fill the card.
+DISK=/dev/mmcblk0
+DEV=/dev/mmcblk0p3
+say() { echo "$*" > /dev/tty1 2>/dev/null; }
+
+# First start.  The image ships the data partition empty, a few MiB long, with MBR type
+# DA ("needs formatting").  Grow it to the end of the card (one partition-table write),
+# create the filesystem directly at full size (a second or two: inode tables are
+# initialised lazily), and only then mark the partition 83.  Power can be cut at any
+# point: until the type changes nothing of the user's is on it and the next start simply
+# repeats the job; once it has changed, this code never runs again.
+# (rc3 shipped a small filesystem and resized it online in the background.  That took
+# ~25 s on a 16 GB card and, interrupted by the power switch, left the filesystem
+# inconsistent - hardware report 2026-11-18.)
+first_start() {
+	say "First start: preparing storage..."
+	{
+		mke2fs -q -F -t ext4 -b 4096 -L NZDATA -m 1 -E lazy_itable_init=1,lazy_journal_init=1,nodiscard $DEV &&
+		sync && nz-growpart --settype $DISK 3 83 && sync && echo formatted
+	} >> /run/nz/data-format.log 2>&1
+}
+
+# A reflash rewrites the partition table (type DA again) but not the data partition's
+# contents: the image file ends where that partition starts.  If a NimbleZero data
+# filesystem is already there and fits the card, adopt it instead of formatting, so
+# settings and files survive an OS update.  (Labels: NZDATA, or CZDATA from rc7 and
+# earlier.)  To start clean instead, put an empty file "nz-reset-data" on the boot
+# partition - or use Options > Erase all data, which does exactly that.
+existing_fs() {
+	info=$(tune2fs -l $DEV 2>/dev/null) || return 1
+	case "$(echo "$info" | sed -n 's/^Filesystem volume name: *//p')" in NZDATA|CZDATA) ;; *) return 1 ;; esac
+	bc=$(echo "$info" | sed -n 's/^Block count: *//p'); bs=$(echo "$info" | sed -n 's/^Block size: *//p')
+	psz=$(cat /sys/class/block/${DEV##*/}/size 2>/dev/null) || return 1
+	[ -n "$bc" ] && [ -n "$bs" ] && [ $((bc * (bs / 512))) -le "$psz" ]
+}
+adopt_or_format() {
+	nz-growpart $DISK 3 > /run/nz/data-format.log 2>&1
+	if [ -e /boot/nz-reset-data ]; then
+		echo "reset requested (nz-reset-data)" >> /run/nz/data-format.log
+		first_start
+		mount -o remount,rw /boot 2>/dev/null && { rm -f /boot/nz-reset-data; sync; mount -o remount,ro /boot; }
+	elif existing_fs; then
+		say "Keeping your data..."
+		nz-growpart --settype $DISK 3 83 >> /run/nz/data-format.log 2>&1 && sync && echo kept >> /run/nz/data-format.log
+	else
+		first_start
+	fi
+}
+
+case "$1" in
+start)
+	mkdir -p /run/nz
+	say "NimbleZero starting..."
+	t=$(nz-growpart --type $DISK 3 2>/dev/null)
+	if [ "$t" = da ]; then adopt_or_format
+	elif [ "$t" = 83 ] && [ -e /boot/nz-reset-data ]; then
+		# erase requested: back to "needs formatting" first, so a power cut repeats the job
+		nz-growpart --settype $DISK 3 da > /run/nz/data-format.log 2>&1 && adopt_or_format
+	fi
+	if [ "$(nz-growpart --type $DISK 3 2>/dev/null)" != 83 ] ||
+	   ! mount -t ext4 -o rw,noatime,commit=5 $DEV /data 2>/dev/null; then
+		# never repair in the boot path: a long fsck with a blank screen looks like a hang
+		mount -t tmpfs -o size=48m,mode=0755 tmpfs /data
+		: > /run/nz/data-volatile
+		echo "nz-data: data partition unusable, /data is in RAM - nothing will persist" > /dev/kmsg
+		say "Storage problem: settings will not be kept."
+	fi
+	# Seed /data from the image once (copy to a temporary name, then rename: a power cut
+	# mid-copy leaves nothing half-made), then cover the read-only originals.
+	#   /home, /root   user files
+	#   /var/lib       program state (app settings, mixer levels, enabled units).  The
+	#                  package database is the exception: /var/lib/dpkg is a link to
+	#                  /var/dpkg-db on the system partition, next to the files it describes.
+	mkdir -p /data/var
+	for d in home root var/lib; do
+		[ -d /$d ] || continue
+		if [ ! -d /data/$d ]; then
+			rm -rf /data/$d.new; cp -a /$d /data/$d.new && mv /data/$d.new /data/$d
+		fi
+		[ -d /data/$d ] && mount -o bind /data/$d /$d
+	done
+	mkdir -p /data/etc/dropbear /data/etc/nz /data/cache
+	chmod 700 /data/etc/dropbear
+	# Password file (see post-fakeroot.sh): seed it once; add accounts a newer image
+	# brought along; never touch existing entries (the user's password).
+	if [ ! -s /data/etc/shadow ]; then
+		cp /etc/shadow.dist /data/etc/shadow.new && chmod 600 /data/etc/shadow.new && mv /data/etc/shadow.new /data/etc/shadow
+	else
+		while IFS=: read -r u rest; do
+			grep -q "^$u:" /data/etc/shadow || echo "$u:$rest" >> /data/etc/shadow
+		done < /etc/shadow.dist
+	fi
+	# the default user's home (a data partition kept from an older image may not have it)
+	if [ ! -d /home/zero ]; then mkdir -p /home/zero/.config && chown -R 1000:1000 /home/zero; fi
+	# saved screen brightness
+	b=$(cat /data/etc/nz/brightness 2>/dev/null)
+	case "$b" in ''|*[!0-9]*) ;; *) for f in /sys/class/backlight/*/brightness; do [ -e "$f" ] && echo "$b" > "$f" 2>/dev/null; done ;; esac
+	;;
+stop)
+	sync
+	umount /home /root /var/lib 2>/dev/null
+	umount /data 2>/dev/null || mount -o remount,ro /data 2>/dev/null
+	;;
+esac

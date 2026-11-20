@@ -1,0 +1,34 @@
+image boot.vfat {
+	vfat {
+		label = "NZBOOT"
+		files = {
+#BOOT_FILES#
+		}
+	}
+	size = 64M
+}
+
+image sdcard.img {
+	hdimage {
+		partition-table-type = "mbr"
+	}
+
+	partition boot {
+		partition-type = 0xC
+		bootable = "true"
+		image = "boot.vfat"
+		offset = 4M
+	}
+
+	partition rootfs {
+		partition-type = 0x83
+		image = "rootfs.ext4"
+	}
+
+	# Persistent data: shipped unformatted (type DA); the first boot grows it to the end of
+	# the card, formats it and sets type 83 (S12nz-data).
+	partition data {
+		partition-type = 0xDA
+		image = "data.img"
+	}
+}

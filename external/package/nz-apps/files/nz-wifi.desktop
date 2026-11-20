@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Wi-Fi setup
+Comment=Scan and join a network
+Exec=sudo -n /usr/sbin/nz-admin wifi
+Terminal=true

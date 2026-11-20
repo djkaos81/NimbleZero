@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Diagnostics
+Comment=Hardware checklist and tests
+Exec=nz-diag
+Terminal=false

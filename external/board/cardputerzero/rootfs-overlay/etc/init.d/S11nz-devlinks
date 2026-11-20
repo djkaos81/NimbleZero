@@ -1,0 +1,22 @@
+#!/bin/sh
+# Stable device names used by the M5Stack software (udev rules on the stock image).
+case "$1" in
+start)
+	for f in /sys/class/graphics/fb*; do
+		[ -e "$f/name" ] || continue
+		case "$(cat "$f/name")" in *mipi*|*st7789*|*panel*) ln -sf "/dev/${f##*/}" /dev/fb_lcd ;; esac
+	done
+	[ -e /dev/fb_lcd ] || { [ -e /dev/fb0 ] && ln -sf /dev/fb0 /dev/fb_lcd; }
+	for c in /sys/class/drm/card[0-9]; do
+		case "$(readlink -f "$c/device")" in *spi*) mkdir -p /dev/dri; ln -sf "/dev/dri/${c##*/}" /dev/dri/cardputer-zero-internal ;; esac
+	done
+	# Equivalent of the stock image's fb_load: commit a modeset so the panel is lit
+	# whichever fb number it got and whether or not fbcon is bound to it.
+	nz-diag --activate > /run/nz/fb-activate 2>&1
+	# Sym-layer symbols for the text console (the keyboard driver sends private codes)
+	nz-diag --keymap > /run/nz/keymap 2>&1
+	for i in /sys/class/input/event*; do
+		case "$(cat "$i/device/name" 2>/dev/null)" in *tca8418*|*TCA8418*) ln -sf "/dev/input/${i##*/}" /dev/input/cardputer-zero-internal ;; esac
+	done
+	;;
+esac

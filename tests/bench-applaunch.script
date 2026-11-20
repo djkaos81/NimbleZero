@@ -1,0 +1,5 @@
+# Upstream APPLaunch running (installed from the release .deb on the USB stick).
+B0 install + start :: : > /run/nz/nolauncher; killall nz-diag nz-launcher 2>/dev/null; modprobe usb-storage; sleep 6; mkdir -p /mnt; mount -o ro /dev/sda /mnt; apt-get install -y /mnt/applaunch_0.6.106-m5stack1_arm64.deb >/dev/null 2>&1; mkdir -p /dev/input/by-path; ln -sf /dev/input/event0 /dev/input/by-path/platform-3f804000.i2c-event; killall getty 2>/dev/null; [ -x /etc/init.d/S60nz-units ] && /etc/init.d/S60nz-units start; sleep 60; pidof M5CardputerZero-APPLaunch
+BENCH applaunch :: nz-perf -i 30
+B1 APPLaunch process memory :: p=$(pidof M5CardputerZero-APPLaunch); grep -E '^(Rss|Pss|Private_Dirty):' /proc/$p/smaps_rollup; grep -E 'Threads|VmRSS' /proc/$p/status
+@shot bench-applaunch

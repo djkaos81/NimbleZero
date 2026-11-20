@@ -1,0 +1,16 @@
+[Unit]
+Description=Cardputer Zero device aliases, networking helper and boot log
+After=systemd-udev-settle.service basic.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/init.d/S11nz-devlinks start
+ExecStart=/etc/init.d/S45nz-net start
+ExecStart=/etc/init.d/S99nz-bootlog start
+# the scripts leave background helpers running on purpose
+KillMode=none
+
+[Install]
+WantedBy=multi-user.target

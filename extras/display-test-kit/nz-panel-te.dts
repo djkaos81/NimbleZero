@@ -1,0 +1,16 @@
+/dts-v1/;
+/plugin/;
+/* NimbleZero test overlay: tell the LCD driver that the panel's sync output (TE, "tearing
+ * effect") is wired to GPIO 5.  The vendor device tree has this line commented out, and the
+ * wiring has not been confirmed on hardware; the NimbleZero test driver only listens on the
+ * pin (input) and reports what it sees.
+ * Load it AFTER the cardputerzero overlay in config.txt:  dtoverlay=nz-panel-te */
+/ {
+	compatible = "brcm,bcm2835";
+	fragment@0 {
+		target-path = "/soc/spi@7e204000/st7789v@0";
+		__overlay__ {
+			te-gpios = <&gpio 5 0>;
+		};
+	};
+};

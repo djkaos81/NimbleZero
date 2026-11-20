@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=System monitor
+Comment=htop
+Exec=htop
+Terminal=true

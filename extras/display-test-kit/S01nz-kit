@@ -1,0 +1,18 @@
+#!/bin/sh
+# NimbleZero display test kit - safety net (installed by install.sh, removed by "restore").
+# If the screen stays dark with the test driver and SSH cannot be reached: put the card in
+# a PC, create an empty file named  nz-kit-restore  on the NZBOOT partition, boot the
+# device.  This script then puts the original display driver back and restarts once
+# (the driver is loaded before this script runs, so the restart is needed).
+[ "$1" = start ] || exit 0
+[ -e /boot/nz-kit-restore ] || exit 0
+M=/lib/modules/6.18.60-v8-cz/updates/panel-mipi-dbi-m.ko
+S=/usr/lib/nz-kit/panel-mipi-dbi-m.stock.ko
+[ -s $S ] || exit 0
+mount -o remount,rw / && { cat $S > $M; rm -f /etc/modprobe.d/nz-panel.conf; sync; mount -o remount,ro /; echo "nz-kit: original display driver restored" > /dev/kmsg; }
+if mount -o remount,rw /boot 2>/dev/null; then
+	grep -v '^dtoverlay=nz-panel-' /boot/config.txt > /boot/config.new && [ -s /boot/config.new ] && cat /boot/config.new > /boot/config.txt
+	rm -f /boot/config.new /boot/nz-kit-restore; sync; mount -o remount,ro /boot
+	[ -e /boot/nz-kit-restore ] || reboot -f      # marker gone: restart once with the original driver
+fi
+exit 0

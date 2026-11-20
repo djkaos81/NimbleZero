@@ -1,0 +1,53 @@
+#!/bin/sh
+# apt-get shim for images without APT.  It never talks to a Debian mirror -
+# Debian's libc6 & co. must not replace the Buildroot runtime - but it gives the
+# M5Stack updaters what they actually use:
+#   apt-get update                      no-op
+#   apt-get install [-y] ./pkg.deb ...  dependency check against the dpkg database, then dpkg -i
+#   apt-get install [-y] NAME ...       succeeds only if NAME is already installed/provided
+#   apt-get remove|purge NAME ...       dpkg -r / dpkg -P
+VERB=; PKGS=; DPKG_OPTS=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o) case "$2" in Dpkg::Options::=*) DPKG_OPTS="$DPKG_OPTS ${2#Dpkg::Options::=}" ;; esac; shift ;;
+	-*) ;;
+	update|install|remove|purge|upgrade|dist-upgrade|autoremove|clean) [ -z "$VERB" ] && VERB=$1 || PKGS="$PKGS $1" ;;
+	*) PKGS="$PKGS $1" ;;
+	esac; shift
+done
+have() {   # have NAME [OP VERSION]
+	v=$(dpkg-query -W -f='${db:Status-Status} ${Version}' "$1" 2>/dev/null) || {
+		# virtual packages: any installed package that Provides: NAME
+		dpkg-query -W -f='${db:Status-Status} ${Provides}\n' 2>/dev/null | grep -qE "^installed .*(^|[ ,])$1([ ,(]|$)" && return 0
+		return 1; }
+	case "$v" in installed\ *) ;; *) return 1 ;; esac
+	[ -z "$2" ] || dpkg --compare-versions "${v#installed }" "$2" "$3"
+}
+unmet() {  # print unmet Depends/Pre-Depends of a .deb
+	dpkg-deb -f "$1" Pre-Depends Depends | sed 's/^[A-Za-z-]*: //' | tr ',' '\n' | while read -r alt; do
+		[ -n "$alt" ] || continue; ok=1
+		echo "$alt" | tr '|' '\n' | { while read -r d; do
+			n=$(echo "$d" | sed 's/[ (:].*//'); op=$(echo "$d" | sed -n 's/.*(\([<>=]*\) *\([^)]*\)).*/\1/p'); ver=$(echo "$d" | sed -n 's/.*(\([<>=]*\) *\([^)]*\)).*/\2/p')
+			case "$op" in "<") op="<<" ;; ">") op=">>" ;; esac
+			if have "$n" $op $ver; then ok=0; fi
+		done; [ $ok = 0 ] || echo "$alt"; }
+	done
+}
+case "$VERB" in
+update) echo "apt-get (nz shim): no package index on this system; nothing to update"; exit 0 ;;
+clean|autoremove|upgrade|dist-upgrade) exit 0 ;;
+install)
+	debs=
+	for p in $PKGS; do
+		case "$p" in
+		*.deb) [ -f "$p" ] || { echo "E: Unsupported file $p given on commandline" >&2; exit 100; }
+			u=$(unmet "$p"); [ -z "$u" ] || { echo "E: $(dpkg-deb -f "$p" Package): unmet dependencies (not provided by this firmware):" >&2; echo "$u" | sed 's/^/E:   /' >&2; exit 100; }
+			debs="$debs $p" ;;
+		*) have "${p%%=*}" || { echo "E: Unable to locate package $p (this system has no APT repositories)" >&2; exit 100; } ;;
+		esac
+	done
+	[ -z "$debs" ] || dpkg $DPKG_OPTS -i $debs || exit 100 ;;
+remove) dpkg -r $PKGS || exit 100 ;;
+purge) dpkg -P $PKGS || exit 100 ;;
+*) echo "apt-get (nz shim): unsupported command '$VERB'" >&2; exit 100 ;;
+esac

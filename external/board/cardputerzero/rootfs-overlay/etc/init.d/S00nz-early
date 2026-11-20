@@ -1,0 +1,27 @@
+#!/bin/sh
+# Cardputer Zero early bring-up: boot partition, display path first, device aliases.
+# Runs before mdev coldplug so the LCD shows boot progress as early as possible.
+case "$1" in
+start)
+	mkdir -p /run/nz
+	cut -d' ' -f1 /proc/uptime > /run/nz/t_init_start
+	mount -t vfat -o ro,noatime /dev/mmcblk0p1 /boot 2>/dev/null
+	# bus drivers, IO expander (backlight PWM, keyboard reset), backlight, panel, keyboard
+	# Do NOT load gpio_forwarder here.  It completes the SPI controller, so loading it early
+	# starts the LCD ~0.13 s after the IO expander powers the panel instead of ~1.7 s after.
+	# rc3/rc4 did that and the panel stayed dark on hardware although every driver
+	# reported success (ST7789 controllers ignore commands sent too soon after power-up).
+	# udev loads gpio_forwarder later; that order is the one seen working (rc2).
+	# LCD driver: /etc/modprobe.d/nz-panel.conf switches on the smooth display path (sync to
+	# the panel, scan-order transfer, cached buffers, background sending).  An empty file
+	# "nz-display-original" on the boot partition, or the safe configuration (nz.safe=1),
+	# starts it with the vendor behaviour instead.  See docs/DISPLAY.md.
+	PANEL=""
+	if [ -e /boot/nz-display-original ] || grep -qw 'nz.safe=1' /proc/cmdline; then
+		PANEL="nz_path=0 nz_native=0 nz_te=0 nz_cached=0 nz_async=0 nz_fbdev_ms=0"
+	fi
+	for m in i2c_bcm2835 i2c_dev spi_bcm2835 m5ioe1 pwm_bl_m5stack panel_mipi_dbi_m tca8418_keypad_m5stack; do
+		if [ $m = panel_mipi_dbi_m ]; then modprobe -q $m $PANEL; else modprobe -q $m; fi
+	done
+	;;
+esac

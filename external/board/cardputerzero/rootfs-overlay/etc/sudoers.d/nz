@@ -1,0 +1,5 @@
+# NimbleZero: members of group sudo (the default user "zero") may become root with their
+# own password.  The settings helper is the only command that needs no password; it
+# accepts a fixed list of actions and validates every argument (see nz-admin).
+%sudo ALL=(ALL:ALL) ALL
+zero ALL=(root) NOPASSWD: /usr/sbin/nz-admin

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Snake
+Comment=nzui example game
+Exec=nz-snake
+Terminal=false

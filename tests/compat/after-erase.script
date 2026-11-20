@@ -1,0 +1,3 @@
+# Boot after "nz-reset-data" was placed on the boot partition.  (No NZ_SECOND_BOOT: the
+# first-boot prompt must appear again; the harness checks that.)
+E1 the data partition was formatted again and the marker removed :: cat /run/nz/data-format.log; ls /boot/nz-reset-data 2>&1 | tail -n1; grep -q 'reset requested' /run/nz/data-format.log && grep -q formatted /run/nz/data-format.log && [ ! -e /boot/nz-reset-data ] && [ ! -e /home/zero/marker ]

@@ -1,0 +1,125 @@
+#!/bin/sh
+# NimbleZero display test driver - controls and measurements.  Run with sudo on the device.
+#   nz-panel.sh status               clocks, sync pin, driver counters
+#   nz-panel.sh auto                 the standard series (about 1 minute); output also saved in
+#                                    /home/zero/panel-auto.txt
+#   nz-panel.sh orient               shows the test card in the four "native" variants
+#   nz-panel.sh set PATH NATIVE TE [DELAY_US]   switch by hand, e.g.  set 1 2 1 0
+#   nz-panel.sh cached 0|1           picture buffers in cached memory (for programs started afterwards)
+#   nz-panel.sh async 0|1            send frames in the background (needs scan order + sync)
+#   nz-panel.sh fbdev MS             how long /dev/fb0 changes are collected before they are passed
+#                                    on (0 = kernel value, 50 ms)
+#   nz-panel.sh smooth               the candidate setting: set 1 2 1 0 + cached 1 + async 1 + fbdev 16
+#   nz-panel.sh smooth-sync          the same without async (build 2's candidate)
+#   nz-panel.sh stock                back to the original behaviour
+#   nz-panel.sh default              back to what this device starts with (see install.sh boot-default)
+#   nz-panel.sh fbbars|fbblink [SECONDS]   pictures drawn into /dev/fb0, like launcher and apps
+#   nz-panel.sh bars [SECONDS] [WORK_MS]   moving bars with the current setting; WORK_MS: the
+#                                    test program stays busy that long before each frame
+#   nz-panel.sh card [SECONDS]       test card with the current setting
+#   nz-panel.sh doom                 45 seconds of Doom's built-in demo as fast as the display
+#                                    accepts frames, with the current setting; ends by itself;
+#                                    output also saved in /home/zero/panel-doom.txt
+#   nz-panel.sh dcs HEX...           raw panel command, e.g.  dcs c6 15   (experiments)
+# Switches:  PATH 0 = original kernel path, 1 = NimbleZero path
+#            NATIVE 0 = original pixel order, 1..4 = panel scan order (four mirror variants)
+#            TE 1 = start each full frame on the panel's sync pulse
+# All switches return to their start values at every restart (0 unless boot-default is on).
+[ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+P=/sys/module/panel_mipi_dbi_m/parameters
+S=$(ls -d /sys/bus/spi/devices/*/nz_stats 2>/dev/null | head -n1); DEV=${S%/nz_stats}
+N=/proc/device-tree/soc/spi@7e204000/st7789v@0
+T=/usr/lib/nz-kit/nz-paneltest; [ -x $T ] || T=$(dirname "$0")/files/nz-paneltest
+[ -e $P/nz_fbdev_ms ] || { [ -e $P/nz_path ] && echo "an earlier build of the test driver is running; install build 4 (sudo sh nz-kit/install.sh install) and restart"; }
+[ -e $P/nz_fbdev_ms ] && [ -n "$S" ] || { echo "the test display driver is not running (install it and restart first)"; exit 1; }
+be32() { od -A n -t u1 "$1" 2>/dev/null | awk '{print $1*16777216+$2*65536+$3*256+$4}'; }
+setp() { echo "$1" > $P/nz_path; echo "$2" > $P/nz_native; echo "$3" > $P/nz_te; echo "${4:-0}" > $P/nz_te_delay_us; }
+stats() { cat "$S" | sed 's/^/    /'; }
+all() {   # path native te cached async fbdev_ms
+	setp "$1" "$2" "$3" 0; echo "$4" > $P/nz_cached; echo "$5" > $P/nz_async; echo "$6" > $P/nz_fbdev_ms
+}
+dflt() { if [ -e /etc/modprobe.d/nz-panel.conf ]; then all 1 2 1 1 1 16; else all 0 0 0 0 0 0; fi; }
+fbrun() {   # label kind seconds
+	echo "--- test $1: $2 with the setting above   (watch the screen)"
+	cat "$S" > /dev/null; t0=$(date +%s)
+	$T "$2" "$3" | sed 's/^/    /'; sleep 1
+	o=$(cat "$S"); n=$(echo "$o" | sed -n 's/^frames=\([0-9]*\).*/\1/p'); echo "$o" | sed 's/^/    /'
+	echo "    reached the panel: $n updates in about $(( $(date +%s) - t0 )) s"
+}
+te_check() {   # prints pulses per second seen on the sync pin
+	a=$(sed -n 's/.*te_pulses=\([0-9]*\).*/\1/p' "$S"); sleep 2; b=$(sed -n 's/.*te_pulses=\([0-9]*\).*/\1/p' "$S")
+	per=$(sed -n 's/.*te_period_us=\([0-9]*\).*/\1/p' "$S")
+	echo "sync pin: $(( (b - a) / 2 )) pulses/s, last period $per us"
+}
+status() {
+	echo "image: $(sed -n 's/^VERSION=//p' /etc/nz-release)   kernel: $(uname -r)"
+	req=$(be32 $N/spi-max-frequency); echo "requested panel clock: $req Hz"
+	mount -t debugfs none /sys/kernel/debug 2>/dev/null
+	core=$(awk '$1=="vpu"{for(i=2;i<=NF;i++) if ($i+0>1000000) {print $i; exit}}' /sys/kernel/debug/clk/clk_summary 2>/dev/null)
+	[ -n "$core" ] && [ -n "$req" ] && awk -v c="$core" -v r="$req" 'BEGIN{d=int((c+r-1)/r); if (d%2) d++; if (d<2) d=2; f=c/d;
+		printf "SPI source %d Hz, divider %d -> actual panel clock %.2f MHz -> pixel data alone takes %.2f ms per frame\n", c, d, f/1e6, 320*170*16/f*1000}'
+	echo "sync pin in device tree: $([ -e $N/te-gpios ] && echo yes || echo no)"
+	te_check
+	for c in /sys/devices/system/cpu/cpu0/cpufreq; do [ -d $c ] && echo "cpu: $(cat $c/scaling_governor), now $(cat $c/scaling_cur_freq) kHz"; done
+	echo "temperature: $(awk '{printf "%.1f C", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)"
+	echo "driver counters since last read:"; stats
+}
+run() {   # label path native te cached async work_ms
+	echo "--- test $1: path=$2 native=$3 te=$4 cached=$5 async=$6 work=$7 ms   (watch the moving bars)"
+	setp "$2" "$3" "$4" 0; echo "$5" > $P/nz_cached; echo "$6" > $P/nz_async; cat "$S" > /dev/null
+	$T bars 5 "$7" | sed 's/^/    /'; stats
+	sleep 1
+}
+case "${1:-}" in
+status) status ;;
+stock) all 0 0 0 0 0 0; echo "original behaviour" ;;
+default) dflt; echo "start values: $(head -n1 "$S")" ;;
+fbdev) echo "${2:-0}" > $P/nz_fbdev_ms; echo "fbdev_ms=$(cat $P/nz_fbdev_ms)" ;;
+fbbars|fbblink) cat "$S" > /dev/null; $T "$1" "${2:-10}"; sleep 1; stats ;;
+async) echo "${2:-1}" > $P/nz_async; echo "async=$(cat $P/nz_async)" ;;
+smooth-sync) setp 1 2 1 0; echo 1 > $P/nz_cached; echo 0 > $P/nz_async; echo "panel scan order + sync + cached buffers (no background sending), until restart or: nz-panel.sh stock" ;;
+cached) echo "${2:-1}" > $P/nz_cached; echo "cached=$(cat $P/nz_cached) for programs started from now on" ;;
+smooth) all 1 2 1 1 1 16; echo "panel scan order + sync + cached buffers + background sending + fast /dev/fb0, until restart or: nz-panel.sh stock" ;;
+set) [ $# -ge 4 ] || { echo "usage: set PATH NATIVE TE [DELAY_US]"; exit 2; }; setp "$2" "$3" "$4" "${5:-0}"; echo "set"; ;;
+bars) cat "$S" > /dev/null; $T bars "${2:-10}" "${3:-0}"; stats ;;
+card) $T card "${2:-8}" ;;
+dcs) shift; echo "$*" > $DEV/nz_dcs && echo "sent: $*" ;;
+orient)
+	for v in 1 2 3 4; do
+		echo "variant $v: is the F upright and readable, RED top-left, GREEN top-right, BLUE bottom-left, WHITE bottom-right?"
+		setp 1 $v 0 0; $T card 6 > /dev/null
+	done
+	setp 0 0 0 0; echo "back to original.  Tell me which variant number looked right (expected: 2)."
+	;;
+auto)
+	{
+	status
+	tep=$(sed -n 's/.*te_pulses=\([0-9]*\).*/\1/p' "$S")
+	echo "smooth setting from power-on: $([ -e /etc/modprobe.d/nz-panel.conf ] && echo on || echo off)"
+	echo "=== original setting"; all 0 0 0 0 0 0
+	fbrun A fbbars 5
+	if [ "${tep:-0}" -gt 0 ]; then
+		echo "=== smooth setting, /dev/fb0 at the kernel's pace (50 ms)"; all 1 2 1 1 1 0
+		fbrun B fbbars 5
+		echo "=== smooth setting, /dev/fb0 at 16 ms"; all 1 2 1 1 1 16
+		fbrun C fbbars 5
+		fbrun D fbblink 5
+		run E 1 2 1 1 1 10
+	else echo "--- tests B-E skipped: no pulses on the sync pin"; fi
+	dflt
+	echo "kernel messages:"; dmesg | grep -iE 'spi|mipi|panel|nz' | grep -iE 'error|fail|timeout|overrun|cached' | tail -n 6
+	echo "done (back to this device's start values)"
+	} 2>&1 | tee /home/zero/panel-auto.txt
+	chown zero:zero /home/zero/panel-auto.txt
+	;;
+doom)
+	{
+	echo "setting: $(head -n1 "$S")"
+	echo "Doom's demo runs for 45 seconds and stops by itself..."
+	su zero -c 'cd /home/zero/doom && timeout 45 ./nz-doom -iwad freedoom1.wad -timedemo demo1 -nzfps 1 2>&1 | grep -E "timed|nz-doom:"'
+	stats
+	} 2>&1 | tee -a /home/zero/panel-doom.txt
+	chown zero:zero /home/zero/panel-doom.txt
+	;;
+*) sed -n '2,30p' "$0"; exit 2 ;;
+esac

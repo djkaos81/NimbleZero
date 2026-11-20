@@ -1,0 +1,11 @@
+#!/bin/sh
+# Emulator support.  Under QEMU (kernel command line nz.qemu=1 AND the emulated board
+# model, which no Cardputer Zero reports) the console is the PL011 ttyAMA0 and the test
+# harness gets a root shell there, because root has no password to log in with.
+# On real hardware ttyAMA0 is the Bluetooth UART and this never runs.
+case "$1" in
+start)
+	grep -q 'nz.qemu=1' /proc/cmdline && grep -aq 'Raspberry Pi 3 Model B' /proc/device-tree/model 2>/dev/null || exit 0
+	( while :; do setsid sh -c 'exec /bin/login -f root </dev/ttyAMA0 >/dev/ttyAMA0 2>&1'; sleep 1; done ) &
+	;;
+esac

@@ -1,0 +1,1 @@
+zero 1000 zero 1000 ! /home/zero /bin/sh audio,video,input,dialout,gpio,sudo,tty Default user (UID 1000, expected by M5Stack packages); password set at first boot

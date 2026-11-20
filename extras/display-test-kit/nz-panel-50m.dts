@@ -1,0 +1,14 @@
+/dts-v1/;
+/plugin/;
+/* NimbleZero test overlay: ask for a 50 MHz SPI clock for the LCD (vendor default: 60 MHz).
+ * Load it AFTER the cardputerzero overlay in config.txt:  dtoverlay=nz-panel-50m
+ * The Pi can only produce core_clock / even number, at or below the requested value. */
+/ {
+	compatible = "brcm,bcm2835";
+	fragment@0 {
+		target-path = "/soc/spi@7e204000/st7789v@0";
+		__overlay__ {
+			spi-max-frequency = <50000000>;
+		};
+	};
+};

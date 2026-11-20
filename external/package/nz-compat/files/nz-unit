@@ -1,0 +1,70 @@
+#!/bin/sh
+# nz-unit - minimal runner for simple systemd unit files on a BusyBox-init system
+# (Configuration A).  Supports exactly what the M5Stack packages use:
+# [Service] Type=simple|oneshot, ExecStartPre=, ExecStart=, WorkingDirectory=,
+# Environment=, Restart=always|on-failure, RestartSec=, Nice=.  No dependencies,
+# sockets, timers, cgroups or sandboxing.  State lives in /run/nz-units.
+#   nz-unit [--user UID] start|stop|restart|is-active|main-pid|path UNIT
+SCOPE=system; RUNAS=
+[ "$1" = --user ] && { SCOPE=user; RUNAS=$2; shift 2; }
+VERB=$1; UNIT=$2
+case "$UNIT" in *.*) ;; *) UNIT=$UNIT.service ;; esac
+RUN=/run/nz-units/$SCOPE; mkdir -p "$RUN"
+[ -n "$LANG" ] || { [ -r /etc/locale.conf ] && . /etc/locale.conf; export LANG; }
+find_unit() {
+	if [ $SCOPE = user ]; then dirs="/etc/systemd/user /usr/lib/systemd/user /lib/systemd/user"
+	else dirs="/etc/systemd/system /usr/lib/systemd/system /lib/systemd/system"; fi
+	for d in $dirs; do [ -f "$d/$UNIT" ] && { echo "$d/$UNIT"; return 0; }; done; return 1
+}
+key() { sed -n '/^\[Service\]/,/^\[/{s/^'"$1"'=//p}' "$FILE"; }
+alive() { [ -s "$1" ] && [ -d "/proc/$(cat "$1")" ]; }
+kill_tree() { for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done; kill "$1" 2>/dev/null; }
+as_user() {   # run a command line as the unit's user with a session-like environment
+	if [ -n "$RUNAS" ]; then
+		u=$(awk -F: -v id="$RUNAS" '$3==id{print $1}' /etc/passwd)
+		mkdir -p "/run/user/$RUNAS"; chown "$RUNAS" "/run/user/$RUNAS"; chmod 700 "/run/user/$RUNAS"
+		su -s /bin/sh "$u" -c "export XDG_RUNTIME_DIR=/run/user/$RUNAS LANG=$LANG; cd '${WD:-/}' && $ENVS exec $1"
+	else
+		( cd "${WD:-/}" && eval "$ENVS exec $1" )
+	fi
+}
+supervise() {
+	trap 'kill_tree "$(cat "$RUN/$UNIT.main" 2>/dev/null)"; rm -f "$RUN/$UNIT.main" "$RUN/$UNIT.sup"; exit 0' TERM INT
+	while :; do
+		[ -f "$FILE" ] || break                    # the unit was removed while running
+		key ExecStartPre | while read -r c; do case "$c" in -*) as_user "${c#-}" || true ;; *) as_user "$c" ;; esac; done
+		as_user "$(key ExecStart | tail -n1)" & echo $! > "$RUN/$UNIT.main"
+		wait $!; rc=$?
+		rm -f "$RUN/$UNIT.main"; echo "$rc" > "$RUN/$UNIT.exit"
+		case "$(key Restart)" in always) ;; on-failure) [ $rc -ne 0 ] || break ;; *) break ;; esac
+		[ -f "$FILE" ] || break
+		sleep "$(key RestartSec | tr -cd '0-9' | grep . || echo 1)"
+	done
+	rm -f "$RUN/$UNIT.sup"
+}
+FILE=$(find_unit) || { [ "$VERB" = is-active ] && exit 3; echo "nz-unit: unit $UNIT not found" >&2; exit 5; }
+WD=$(key WorkingDirectory | tail -n1)
+ENVS=$(key Environment | sed 's/^"\(.*\)"$/\1/' | tr '\n' ' ')
+N=$(key Nice | tail -n1)
+case "$VERB" in
+start)
+	alive "$RUN/$UNIT.sup" && exit 0
+	if [ "$(key Type)" = oneshot ]; then
+		supervise; exit "$(cat "$RUN/$UNIT.exit" 2>/dev/null || echo 1)"
+	fi
+	( [ -n "$N" ] && renice "$N" $$ >/dev/null 2>&1; supervise ) </dev/null >>"/run/nz-units/$SCOPE/$UNIT.log" 2>&1 &
+	echo $! > "$RUN/$UNIT.sup" ;;
+stop)
+	m=$(cat "$RUN/$UNIT.main" 2>/dev/null)
+	alive "$RUN/$UNIT.sup" && kill "$(cat "$RUN/$UNIT.sup")" 2>/dev/null     # no more restarts
+	[ -n "$m" ] && kill_tree "$m"                                              # the program and its helpers
+	n=0; while [ -n "$m" ] && [ -d "/proc/$m" ] && [ $n -lt 30 ]; do sleep 0.1; n=$((n+1)); done
+	rm -f "$RUN/$UNIT.sup" "$RUN/$UNIT.main" ;;
+restart) "$0" ${RUNAS:+--user $RUNAS} stop "$UNIT"; sleep 1; exec "$0" ${RUNAS:+--user $RUNAS} start "$UNIT" ;;
+is-active) alive "$RUN/$UNIT.main" || alive "$RUN/$UNIT.sup" ;;
+main-pid)   # su/sh may sit between us and the real program: report the leaf process
+	p=$(cat "$RUN/$UNIT.main" 2>/dev/null) || { echo 0; exit 0; }
+	while c=$(pgrep -P "$p" | head -n1) && [ -n "$c" ]; do p=$c; done; echo "${p:-0}" ;;
+path) echo "$FILE" ;;
+*) echo "usage: nz-unit [--user UID] start|stop|restart|is-active|main-pid|path UNIT" >&2; exit 2 ;;
+esac

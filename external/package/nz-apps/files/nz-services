@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# nz-services - switch background services on and off (launcher: Services).
+A="sudo -n /usr/sbin/nz-admin"; [ "$(id -u)" = 0 ] && A=/usr/sbin/nz-admin
+TAB=$(printf '\t')
+pause() { printf '\nPress Enter '; IFS= read -r _; }
+val() { printf '%s\n' "$S" | sed -n "s/^$1=//p"; }
+addr() { ip -4 addr show wlan0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n1; }
+pos=1
+while :; do
+	S=$($A status)
+	if [ "$(val ssh-running)" = yes ]; then sshs=on; sshd="ssh zero@$(addr)"
+	elif [ "$(val password)" = none ]; then sshs=off; sshd="needs a password: Options > Password"
+	else sshs=off; sshd="root can never log in; user: zero"; fi
+	n=$(printf '%s\n' "SSH server$TAB$sshs$TAB$sshd" \
+		"Clock from the network$TAB$(val ntp)${TAB}now: $(date '+%Y-%m-%d %H:%M')" \
+		"Set the clock now$TAB$TAB${TAB}asks an internet time server" \
+		"Wi-Fi setup$TAB$TAB${TAB}choose, replace or forget a network" | nz-pick -s $pos "Services" "Enter:switch  F/X:move  Esc:back") || exit 0
+	pos=$n
+	case $n in
+	1) clear 2>/dev/null
+		if [ "$sshs" = on ]; then $A ssh off && echo "SSH server stopped. It stays off after a restart."
+		else $A ssh on && echo "SSH server started.  ssh zero@$(addr)"; fi; pause ;;
+	2) [ "$(val ntp)" = on ] && $A ntp off || $A ntp on ;;
+	3) clear 2>/dev/null; echo "Asking a time server..."; $A ntp sync || echo "The clock was not changed."; pause ;;
+	4) $A wifi ;;
+	esac
+done

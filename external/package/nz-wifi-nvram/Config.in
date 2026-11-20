@@ -1,0 +1,12 @@
+config BR2_PACKAGE_NZ_WIFI_NVRAM
+	bool "nz-wifi-nvram"
+	depends on BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI
+	help
+	  Board-specific CYW43439 NVRAM for the Raspberry Pi Compute Module 0
+	  (Murata Type 1YN), taken from Raspberry Pi's firmware-nonfree
+	  packaging, plus the "raspberrypi,0-compute-module" firmware names
+	  brcmfmac looks for first.
+
+	  Without it brcmfmac falls back to the generic 43439 NVRAM, which
+	  differs in boardflags3; on the first hardware boot that combination
+	  ended in "HT Avail timeout" and no wlan0.
