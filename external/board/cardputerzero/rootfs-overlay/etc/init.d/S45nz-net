@@ -9,6 +9,10 @@ start() {
 		# /boot/wifi.conf (edited on a PC) wins over what the Wi-Fi app saved
 		[ -f /boot/wifi.conf ] && { tr -d '\r' < /boot/wifi.conf > $CONF; chmod 600 $CONF; }
 		grep -q 'ssid=' $CONF 2>/dev/null || exit 0
+		# the Wi-Fi app and the Store ask wpa_supplicant for its state through the control
+		# socket; a hand-written wifi.conf (like wifi.conf.example) has no ctrl_interface
+		# line, and without it the Wi-Fi app shows "not connected" while wlan0 is online
+		grep -q '^[[:space:]]*ctrl_interface=' $CONF || sed -i '1i ctrl_interface=/var/run/wpa_supplicant' $CONF
 		n=0; while [ ! -e /sys/class/net/wlan0 ] && [ $n -lt 20 ]; do sleep 0.5; n=$((n+1)); done
 		[ -e /sys/class/net/wlan0 ] || { echo "nz-net: wlan0 did not appear" > /dev/kmsg; exit 1; }
 		# regulatory domain chosen in the Options menu (channels and power for that country)

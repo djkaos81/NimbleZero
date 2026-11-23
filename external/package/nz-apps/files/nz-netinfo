@@ -5,5 +5,11 @@ echo "== default route"; ip route | grep default || echo "(none)"
 echo "== DNS"; grep nameserver /etc/resolv.conf 2>/dev/null || echo "(none)"
 gw=$(ip route | awk '/default/{print $3; exit}')
 [ -n "$gw" ] && { echo "== ping gateway $gw"; ping -c 2 -W 2 "$gw" | tail -n 2; }
-echo "== Wi-Fi"; wpa_cli -i wlan0 status 2>/dev/null | grep -E '^(ssid|wpa_state|ip_address|freq)=' || echo "(wpa_supplicant not running)"
+# wpa_supplicant's control socket is root-only and this app runs as the normal user;
+# iw reads the link state without privileges
+echo "== Wi-Fi"
+if ! pidof wpa_supplicant >/dev/null 2>&1; then echo "(Wi-Fi not started)"
+elif iw dev wlan0 link 2>/dev/null | grep -q '^Connected'; then
+	iw dev wlan0 link | sed -n 's/^\tSSID: /ssid: /p; s/^\tfreq: /freq: /p; s/^\tsignal: /signal: /p; s/^\ttx bitrate: \([^ ]* [^ ]*\).*/rate: \1/p'
+else echo "(not connected)"; fi
 printf "Press Enter "; read -r _
