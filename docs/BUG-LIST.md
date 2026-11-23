@@ -13,10 +13,16 @@ Commands were renamed from `cz-*` to `nz-*` in rc8; older reports used the `cz-`
 | B8 | low (emulator only so far) | M5 launcher segfaults intermittently when entering some pages; timing-dependent. Not seen on hardware. | emu | open; not root-caused. |
 | B9 | low | 55 of the 101 apps of the M5 app index cannot be installed (rc10; rc9: 69, rc8: 83). They need CJK fonts, pygame, systemd, a Wayland desktop, PipeWire, NetworkManager, BlueZ, Node.js or other Debian packages. The Store lists them with what is missing. | emu (rc10, index copy of 2026-11-19) | open; an add-on repository is planned for a future version. |
 | B11 | medium | SDL2 has no display driver in this image, so an index app that opens an SDL window (for example `tic80-c0`, which asks for KMS/DRM) installs but cannot show anything. The Store lists it as installable. | emu (rc10: SDL2 reports the video drivers `dummy` and `evdev` only) | open. Needs the GPU stack (Mesa with GBM/EGL) or a framebuffer bridge; not small. |
-| B10 | low | "Network info" runs as the normal user and cannot query the Wi-Fi daemon, so its Wi-Fi section says "not running". | source reading (rc8) | open. |
 | B13 | low | `fontpreview` (index app) installs, then exits with code 1 at start. Its own log: "Noto CJK UI fonts are missing or unreadable". It needs the Noto CJK fonts for its interface but does not declare them as a dependency, so the Store lists it as installable. | hw:unit1 (exit code 1); emu (same exit code, log read) | open. Goes away with CJK fonts, which are planned for a future version (owner decision). Until then the Store could carry a short list of apps known not to start. |
 | B14 | medium | Recorder (official M5 app): recording appears to work and a file is saved, but it cannot be played back. | hw:unit1 | open; cause unknown, details requested (what happens on playback, size of the saved file, `/tmp/nz-app.log`). Not reproducible in the emulator (no sound card). |
 | B15 | low | Cardputer TV: sound lags the picture more than on the stock firmware (where it also lags, at a much lower frame rate). | hw:unit1 | open; owner attributes it to the app for now. Not investigated. |
+
+## Fixed after v0.1.0
+
+| # | Bug | Fix | Verified |
+|---|---|---|---|
+| B10 | "Network info" runs as the normal user and cannot query the Wi-Fi daemon, so its Wi-Fi section says "not running". | It reads the link with `iw`, which needs no privileges: SSID, frequency, signal and rate, or "not connected" / "Wi-Fi not started". | hw: a Cardputer Zero running v0.1.0 (not one of the project's units). |
+| B16 | A `wifi.conf` written by hand from `wifi.conf.example` has no `ctrl_interface` line, so `wpa_supplicant` started without a control socket and the Wi-Fi app showed "not connected" while `wlan0` was associated and had an address. | `S45nz-net` adds the line when it is missing. | hw: same device; after a reboot with such a file, `wpa_cli` reports `COMPLETED` and the Wi-Fi app shows the network. |
 
 ## Fixed in rc11, waiting for a hardware test
 
