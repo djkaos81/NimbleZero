@@ -14,7 +14,6 @@ Zero; unit 2: Cardputer Zero Lite); **emu** = emulator only. Numbers refer to `B
 | Apps | AdvanceWebUI downloads but does not start. Cause unknown (B3). | hw unit 1 (rc7) |
 | Sound | Cardputer TV: sound lags the picture, more than on the stock firmware (B15). | hw unit 1 |
 | Clock | The clock shows UTC until a time zone is chosen under Options. The first start does not ask for one. | hw unit 1 |
-| Network info | Its Wi-Fi section says "not running" because the app runs as the normal user (B10). | source reading |
 | M5Stack launcher | Crashes now and then in the emulator after keyboard navigation; never seen on a device (B8). | emu |
 | Missing features | Bluetooth; a camera app (`v4l2-ctl` and ffmpeg are present); GPU acceleration (OpenGL ES); CJK fonts. | by design for this release |
 | USB-C port | Charging only. A PC does not see the device. | hw unit 1 |
